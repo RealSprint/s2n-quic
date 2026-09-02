@@ -56,16 +56,14 @@ impl Drop for State {
         let is_rx_open = !self.rx.is_closed();
         let is_tx_open = !self.tx.is_closed();
 
-        // A half is detached unless it is already `Finished`, i.e. removed from
-        // the stream container. A half whose `Reset` status the application has
-        // observed (for example a peer STOP_SENDING surfaced by `flush()`) is
-        // closed but still held by the container until it is detached; skipping
-        // the detach for it leaked the stream for the rest of the connection.
-        let detach_tx = !self.tx.is_finished();
+        // The send half is always detached, whatever status the application has
+        // observed: a half whose final status (`Finished` or `Reset`, for example
+        // a peer STOP_SENDING surfaced by `flush()`) was observed is closed but
+        // still held by the stream container until it is detached, and skipping
+        // the detach leaked the stream for the rest of the connection. The
+        // receive half is detached unless it is already `Finished`, the status a
+        // send-only stream's unused half carries.
         let detach_rx = !self.rx.is_finished();
-        if !detach_tx && !detach_rx {
-            return;
-        }
 
         let mut request = self.request();
 
@@ -75,9 +73,7 @@ impl Drop for State {
             // This is to stay consistent with std::net::TcpStream
             request.finish();
         }
-        if detach_tx {
-            request.detach_tx();
-        }
+        request.detach_tx();
 
         if is_rx_open {
             // Send a STOP_SENDING message on the receiving half of the `Stream`,
