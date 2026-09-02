@@ -56,27 +56,31 @@ impl Drop for State {
         let is_rx_open = !self.rx.is_closed();
         let is_tx_open = !self.tx.is_closed();
 
-        if is_rx_open || is_tx_open {
-            let mut request = self.request();
+        // Both halves are always detached, even when their final status has
+        // already been observed by the application: a half whose status is
+        // `Reset` or `Finished` still holds its slot in the stream container
+        // until the transport learns that the application is gone. Skipping
+        // the detach for a closed half leaked every stream whose peer reset
+        // (STOP_SENDING) was observed through `flush()` before the drop.
+        let mut request = self.request();
 
-            if is_tx_open {
-                // Dropping a send stream will automatically finish the stream
-                //
-                // This is to stay consistent with std::net::TcpStream
-                request.finish().detach_tx();
-            }
-
-            if is_rx_open {
-                // Send a STOP_SENDING message on the receiving half of the `Stream`,
-                // for the case the application did not consume all data.
-                // If that already happened, this will be a noop.
-                request
-                    .stop_sending(application::Error::UNKNOWN)
-                    .detach_rx();
-            }
-
-            let _ = request.poll(None);
+        if is_tx_open {
+            // Dropping a send stream will automatically finish the stream
+            //
+            // This is to stay consistent with std::net::TcpStream
+            request.finish();
         }
+        request.detach_tx();
+
+        if is_rx_open {
+            // Send a STOP_SENDING message on the receiving half of the `Stream`,
+            // for the case the application did not consume all data.
+            // If that already happened, this will be a noop.
+            request.stop_sending(application::Error::UNKNOWN);
+        }
+        request.detach_rx();
+
+        let _ = request.poll(None);
     }
 }
 
