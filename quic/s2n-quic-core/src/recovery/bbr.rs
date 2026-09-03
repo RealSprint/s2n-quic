@@ -222,6 +222,7 @@ pub struct ApplicationSettings {
     probe_bw_cwnd_gain: Option<u32>,
     probe_bw_up_pacing_gain: Option<u32>,
     loss_threshold: Option<u32>,
+    send_quantum_window: Option<Duration>,
 }
 
 impl ApplicationSettings {
@@ -238,6 +239,11 @@ impl ApplicationSettings {
     fn loss_threshold(&self) -> Option<Ratio<u32>> {
         self.loss_threshold
             .map(|loss_threshold| Ratio::new_raw(loss_threshold, 100))
+    }
+
+    /// How much pacing-rate time each paced burst aggregates; `None` = the BBR draft's 1 ms.
+    pub(super) fn send_quantum_window(&self) -> Option<Duration> {
+        self.send_quantum_window
     }
 }
 
@@ -1157,6 +1163,7 @@ impl congestion_controller::Endpoint for Endpoint {
 
 pub mod builder {
     use super::{ApplicationSettings, Endpoint};
+    use crate::time::Duration;
 
     /// Build the congestion controller endpoint with application provided overrides
     #[derive(Debug, Default)]
@@ -1165,6 +1172,7 @@ pub mod builder {
         probe_bw_cwnd_gain: Option<u32>,
         probe_bw_up_pacing_gain: Option<u32>,
         loss_threshold: Option<u32>,
+        send_quantum_window: Option<Duration>,
     }
 
     impl Builder {
@@ -1204,12 +1212,25 @@ pub mod builder {
             self
         }
 
+        /// Set how much pacing-rate time each paced burst aggregates.
+        ///
+        /// The BBR draft sizes a burst as 1 ms of pacing rate, floored at two datagrams
+        /// and capped at `MAX_BURST_PACKETS`. For connections whose pacing rate is a few
+        /// Mbps that floor means a pacing timer every two datagrams; a longer window
+        /// trades burstiness (still capped at `MAX_BURST_PACKETS`) for far fewer timer
+        /// wakeups. The value is clamped to at least 1 ms.
+        pub fn with_send_quantum_window(mut self, send_quantum_window: Duration) -> Self {
+            self.send_quantum_window = Some(send_quantum_window.max(Duration::from_millis(1)));
+            self
+        }
+
         pub fn build(self) -> Endpoint {
             let app_settings = ApplicationSettings {
                 initial_congestion_window: self.initial_congestion_window,
                 probe_bw_cwnd_gain: self.probe_bw_cwnd_gain,
                 probe_bw_up_pacing_gain: self.probe_bw_up_pacing_gain,
                 loss_threshold: self.loss_threshold,
+                send_quantum_window: self.send_quantum_window,
             };
             Endpoint { app_settings }
         }
