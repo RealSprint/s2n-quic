@@ -931,15 +931,46 @@ fn switch_destination_connection_id_after_first_server_response() {
     );
 }
 
-#[test]
-fn limit_number_of_connection_migrations() {
-    // Setup:
-    let mut publisher = Publisher::snapshot();
-    let new_addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
-    let new_addr = SocketAddress::from(new_addr);
-    let new_addr = RemoteAddress::from(new_addr);
-    let first_path = ServerPath::new(
-        new_addr,
+/// Migrates to 127.0.0.2:`port` with a non-probing packet.
+fn migrate(
+    manager: &mut ServerManager,
+    port: u16,
+    publisher: &mut Publisher,
+) -> Result<Id, DatagramDropReason> {
+    let new_addr: SocketAddr = format!("127.0.0.2:{port}").parse().unwrap();
+    let new_addr = RemoteAddress::from(SocketAddress::from(new_addr));
+    let datagram = DatagramInfo {
+        timestamp: NoopClock {}.get_time(),
+        payload_len: 0,
+        ecn: ExplicitCongestionNotification::default(),
+        destination_connection_id: connection::LocalId::TEST_ID,
+        destination_connection_id_classification: connection::id::Classification::Local,
+        source_connection_id: None,
+    };
+    let (id, _) = manager.handle_connection_migration(
+        &new_addr,
+        &datagram,
+        &mut Default::default(),
+        &mut migration::allow_all::Validator,
+        &mut mtu::Manager::new(mtu::Config::default()),
+        &Limits::default(),
+        publisher,
+    )?;
+    let _ = manager.on_processed_packet(
+        id,
+        None,
+        path_validation::Probe::NonProbing,
+        &mut random::testing::Generator(123),
+        publisher,
+    );
+    Ok(id)
+}
+
+fn first_path() -> ServerPath {
+    ServerPath::new(
+        RemoteAddress::from(SocketAddress::from(
+            "127.0.0.1:1".parse::<SocketAddr>().unwrap(),
+        )),
         connection::PeerId::try_from_bytes(&[1]).unwrap(),
         connection::LocalId::TEST_ID,
         RttEstimator::default(),
@@ -948,48 +979,44 @@ fn limit_number_of_connection_migrations() {
         mtu::Config::default(),
         ANTI_AMPLIFICATION_MULTIPLIER,
         0, // pto_jitter_percentage
-    );
-    let mut manager = manager_server(first_path);
-    let mut total_paths = 1;
+    )
+}
 
-    for i in 1..u8::MAX {
-        let new_addr: SocketAddr = format!("127.0.0.2:{i}").parse().unwrap();
-        let new_addr = SocketAddress::from(new_addr);
-        let new_addr = RemoteAddress::from(new_addr);
-        let now = NoopClock {}.get_time();
-        let datagram = DatagramInfo {
-            timestamp: now,
-            payload_len: 0,
-            ecn: ExplicitCongestionNotification::default(),
-            destination_connection_id: connection::LocalId::TEST_ID,
-            destination_connection_id_classification: connection::id::Classification::Local,
-            source_connection_id: None,
-        };
+#[test]
+fn migrations_reuse_path_slots_once_full() {
+    let mut publisher = Publisher::no_snapshot();
+    let mut manager = manager_server(first_path());
 
-        let res = manager.handle_connection_migration(
-            &new_addr,
-            &datagram,
-            &mut Default::default(),
-            &mut migration::allow_all::Validator,
-            &mut mtu::Manager::new(mtu::Config::default()),
-            &Limits::default(),
-            &mut publisher,
+    for port in 1..u8::MAX as u16 {
+        assert!(
+            migrate(&mut manager, port, &mut publisher).is_ok(),
+            "migration {port}"
         );
-        match res {
-            Ok((id, _)) => {
-                let _ = manager.on_processed_packet(
-                    id,
-                    None,
-                    path_validation::Probe::NonProbing,
-                    &mut random::testing::Generator(123),
-                    &mut publisher,
-                );
-                total_paths += 1
-            }
-            Err(_) => break,
-        }
+        assert!(manager.paths.len() <= MAX_ALLOWED_PATHS);
     }
-    assert_eq!(total_paths, MAX_ALLOWED_PATHS);
+    assert_eq!(manager.paths.len(), MAX_ALLOWED_PATHS);
+}
+
+#[test]
+fn paths_with_bytes_in_flight_are_not_reused() {
+    let mut publisher = Publisher::no_snapshot();
+    let mut manager = manager_server(first_path());
+    for port in 1..MAX_ALLOWED_PATHS as u16 {
+        migrate(&mut manager, port, &mut publisher).unwrap();
+    }
+    for path in manager.paths.iter_mut() {
+        path.congestion_controller.bytes_in_flight = 1200;
+    }
+    assert!(matches!(
+        migrate(&mut manager, 100, &mut publisher),
+        Err(DatagramDropReason::PathLimitExceeded)
+    ));
+
+    manager.paths[1].congestion_controller.bytes_in_flight = 0;
+    assert_eq!(
+        migrate(&mut manager, 101, &mut publisher).unwrap(),
+        path_id(1)
+    );
 }
 
 // Connection migration is still allowed to proceed even if the `disable_active_migration`

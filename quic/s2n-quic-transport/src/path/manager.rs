@@ -26,7 +26,7 @@ use s2n_quic_core::{
         mtu, Handle as _, Id,
     },
     random,
-    recovery::congestion_controller::{self, Endpoint as _},
+    recovery::congestion_controller::{self, CongestionController as _, Endpoint as _},
     stateless_reset,
     time::{timer, Timestamp},
     transport,
@@ -34,7 +34,7 @@ use s2n_quic_core::{
 use smallvec::SmallVec;
 
 /// The amount of Paths that can be maintained without using the heap.
-/// This value is also used to limit the number of connection migrations.
+/// Once full, a new path takes the slot of one that can be dropped.
 const MAX_ALLOWED_PATHS: usize = 5;
 
 /// The PathManager handles paths for a specific connection.
@@ -64,10 +64,7 @@ pub struct Manager<Config: endpoint::Config> {
     /// creating new paths with garbage data and preventing the peer to migrate paths.
     ///
     /// Note that it doesn't prevent an on-path attacker from observing/forwarding
-    /// authenticated packets from bogus addresses. Because of the current hard limit
-    /// of `MAX_ALLOWED_PATHS`, this will prevent the peer from migrating, if it needs to.
-    /// The `paths` data structure will need to be enhanced to include garbage collection
-    /// of old paths to overcome this limitation.
+    /// authenticated packets from bogus addresses.
     pending_packet_authentication: Option<u8>,
 }
 
@@ -379,19 +376,16 @@ impl<Config: endpoint::Config> Manager<Config> {
         // use that index instead of pushing on to the end.
         let new_path_idx = if let Some(idx) = self.pending_packet_authentication {
             idx as _
-        } else {
+        } else if self.paths.len() < MAX_ALLOWED_PATHS {
             let idx = self.paths.len();
             self.pending_packet_authentication = Some(idx as _);
             idx
-        };
-
-        // TODO: Support deletion of old paths: https://github.com/aws/s2n-quic/issues/741
-        // The current path manager implementation does not delete or reuse indices
-        // in the path array. This can result in an unbounded number of paths. To prevent
-        // this we limit the max number of paths per connection.
-        if new_path_idx >= MAX_ALLOWED_PATHS {
+        } else if let Some(idx) = self.reusable_path_index() {
+            // Marked pending only once the slot is overwritten below.
+            idx
+        } else {
             return Err(DatagramDropReason::PathLimitExceeded);
-        }
+        };
         let new_path_id = path_id(new_path_idx as u8);
 
         //= https://www.rfc-editor.org/rfc/rfc9000#section-9.4
@@ -494,8 +488,19 @@ impl<Config: endpoint::Config> Manager<Config> {
         } else {
             self.paths.push(path);
         }
+        self.pending_packet_authentication = Some(new_path_idx as _);
 
         Ok((new_path_id, amplification_outcome))
+    }
+
+    /// A slot whose path can be dropped: not active, not the fallback path, and with
+    /// nothing in flight, so no outstanding packet is attributed to its replacement.
+    fn reusable_path_index(&self) -> Option<usize> {
+        (0..self.paths.len()).find(|&idx| {
+            idx != self.active as usize
+                && Some(idx as u8) != self.last_known_active_validated_path
+                && self.paths[idx].congestion_controller.bytes_in_flight() == 0
+        })
     }
 
     fn set_challenge(&mut self, path_id: Id, random_generator: &mut dyn random::Generator) {
