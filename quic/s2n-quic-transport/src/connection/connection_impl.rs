@@ -1366,7 +1366,7 @@ impl<Config: endpoint::Config> connection::Trait for ConnectionImpl<Config> {
         //# size of packets it receives from that address.
         let handshake_confirmed = self.space_manager.is_handshake_confirmed();
 
-        let (id, amplification_outcome) = self.path_manager.on_datagram_received(
+        let received = self.path_manager.on_datagram_received(
             path_handle,
             datagram,
             handshake_confirmed,
@@ -1375,7 +1375,11 @@ impl<Config: endpoint::Config> connection::Trait for ConnectionImpl<Config> {
             mtu,
             &self.limits,
             &mut publisher,
-        )?;
+        );
+        if let Some(overwritten) = self.path_manager.take_overwritten_path() {
+            self.space_manager.on_path_overwritten(overwritten);
+        }
+        let (id, amplification_outcome) = received?;
 
         publisher.on_datagram_received(event::builder::DatagramReceived {
             len: datagram.payload_len as u16,

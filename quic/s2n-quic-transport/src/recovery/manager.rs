@@ -154,6 +154,21 @@ impl<Config: endpoint::Config> Manager<Config> {
         *self = Self::new(self.space);
     }
 
+    /// Forgets the sent packets recorded for a path whose slot now holds another
+    /// path, so an ACK or loss of those packets is not attributed to the new one.
+    /// The old path's congestion controller went with it, so nothing is discarded.
+    pub fn forget_path(&mut self, path_id: path::Id) {
+        let forgotten: SmallVec<[PacketNumber; 16]> = self
+            .sent_packets
+            .iter()
+            .filter(|(_, info)| info.path_id == path_id)
+            .map(|(packet_number, _)| packet_number)
+            .collect();
+        for packet_number in forgotten {
+            self.sent_packets.remove(packet_number);
+        }
+    }
+
     pub fn on_timeout<Ctx: Context<Config>, Pub: event::ConnectionPublisher>(
         &mut self,
         timestamp: Timestamp,

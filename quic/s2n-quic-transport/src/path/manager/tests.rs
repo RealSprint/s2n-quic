@@ -2037,3 +2037,77 @@ pub struct Helper {
     pub second_path_id: Id,
     pub manager: ServerManager,
 }
+
+#[test]
+fn failed_mtu_configuration_does_not_leave_a_live_slot_pending() {
+    let mut publisher = Publisher::no_snapshot();
+    let mut manager = manager_server(first_path());
+    for port in 1..5 {
+        migrate(&mut manager, port, &mut publisher).unwrap();
+    }
+    let reusable = manager.reusable_path_index().unwrap();
+    let old_handle = manager.paths[reusable].handle;
+    let new_address = RemoteAddress::from(SocketAddress::from(
+        "127.0.0.2:100".parse::<SocketAddr>().unwrap(),
+    ));
+    let datagram = DatagramInfo {
+        timestamp: NoopClock {}.get_time(),
+        payload_len: 1200,
+        ecn: Default::default(),
+        destination_connection_id: connection::LocalId::TEST_ID,
+        destination_connection_id_classification: connection::id::Classification::Local,
+        source_connection_id: None,
+    };
+    let config = mtu::Config::builder()
+        .with_max_mtu(9000)
+        .unwrap()
+        .build()
+        .unwrap();
+    let result = manager.handle_connection_migration(
+        &new_address,
+        &datagram,
+        &mut Default::default(),
+        &mut migration::allow_all::Validator,
+        &mut mtu::Manager::new(config),
+        &Limits::default(),
+        &mut publisher,
+    );
+    assert!(matches!(
+        result,
+        Err(DatagramDropReason::InvalidMtuConfiguration { .. })
+    ));
+    assert_eq!(manager.pending_packet_authentication, None);
+    assert_eq!(manager.paths[reusable].handle, old_handle);
+    let _ = manager
+        .on_processed_packet(
+            path_id(reusable as u8),
+            None,
+            path_validation::Probe::NonProbing,
+            &mut random::testing::Generator(123),
+            &mut publisher,
+        )
+        .unwrap();
+    migrate(&mut manager, 101, &mut publisher).unwrap();
+    assert_eq!(manager.paths[reusable].handle, old_handle);
+}
+
+#[test]
+fn reuse_preserves_active_and_last_validated_paths() {
+    let mut publisher = Publisher::no_snapshot();
+    let mut manager = manager_server(first_path());
+    manager.active_path_mut().on_handshake_packet();
+    let fallback_handle = manager.paths[0].handle;
+    for port in 1..5 {
+        migrate(&mut manager, port, &mut publisher).unwrap();
+    }
+    assert_eq!(manager.last_known_active_validated_path, Some(0));
+    let active = manager.active_path_id();
+    let active_handle = manager[active].handle;
+    let reused = migrate(&mut manager, 100, &mut publisher).unwrap();
+    assert_ne!(reused, path_id(0));
+    assert_ne!(reused, active);
+    assert_eq!(manager.paths[0].handle, fallback_handle);
+    assert_eq!(manager[active].handle, active_handle);
+    assert_eq!(manager.take_overwritten_path(), Some(reused));
+    assert_eq!(manager.take_overwritten_path(), None);
+}

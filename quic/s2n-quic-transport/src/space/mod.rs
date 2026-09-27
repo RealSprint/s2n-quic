@@ -425,6 +425,14 @@ impl<Config: endpoint::Config> PacketSpaceManager<Config> {
         Ok(())
     }
 
+    /// A new path overwrote `path_id`'s slot. Migration needs a confirmed
+    /// handshake, so only the application space can hold packets sent on it.
+    pub fn on_path_overwritten(&mut self, path_id: path::Id) {
+        if let Some((space, _)) = self.application_mut() {
+            space.forget_path(path_id);
+        }
+    }
+
     /// Signals the connection was previously blocked by anti-amplification limits
     /// but is now no longer limited.
     pub fn on_amplification_unblocked(

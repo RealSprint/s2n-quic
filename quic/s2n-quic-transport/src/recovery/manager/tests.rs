@@ -3742,3 +3742,285 @@ impl<Config: endpoint::Config> recovery::Context<Config> for MockContext<'_, Con
         self.on_mtu_update_count += 1;
     }
 }
+
+fn add_validated_path(
+    paths: &mut path::Manager<ServerConfig>,
+    port: u16,
+    timestamp: Timestamp,
+    publisher: &mut Publisher,
+) -> (RemoteAddress, path::Id) {
+    let address = RemoteAddress::from(SocketAddress::from(
+        format!("127.0.0.2:{port}").parse::<SocketAddr>().unwrap(),
+    ));
+    let datagram = DatagramInfo {
+        timestamp,
+        payload_len: 1200,
+        ecn: Default::default(),
+        destination_connection_id: connection::LocalId::TEST_ID,
+        destination_connection_id_classification: connection::id::Classification::Local,
+        source_connection_id: None,
+    };
+    let (id, _) = paths
+        .on_datagram_received(
+            &address,
+            &datagram,
+            true,
+            &mut Endpoint::default(),
+            &mut migration::allow_all::Validator,
+            &mut mtu::Manager::new(mtu::Config::default()),
+            &Limits::default(),
+            publisher,
+        )
+        .unwrap();
+    let _ = paths
+        .on_processed_packet(
+            id,
+            None,
+            frame::path_validation::Probe::NonProbing,
+            &mut random::testing::Generator(123),
+            publisher,
+        )
+        .unwrap();
+    (address, id)
+}
+
+#[test]
+fn old_ack_only_packet_does_not_update_replacement_rtt() {
+    let space = PacketNumberSpace::ApplicationData;
+    let mut publisher = Publisher::no_snapshot();
+    let mut manager = ServerManager::new(space);
+    let mut paths = helper_generate_path_manager(Duration::from_millis(10));
+    paths.active_path_mut().on_handshake_packet();
+    let timestamp = time::now() + Duration::from_secs(1);
+    let old_id = paths.active_path_id();
+    let (_, other_id) = add_validated_path(&mut paths, 1, timestamp, &mut publisher);
+    paths[other_id].on_handshake_packet();
+    {
+        let mut context = MockContext::new(&mut paths);
+        manager.on_packet_sent(
+            space.new_packet_number(VarInt::from_u8(1)),
+            Outcome {
+                ack_elicitation: AckElicitation::Eliciting,
+                is_congestion_controlled: true,
+                bytes_sent: 128,
+                bytes_progressed: 0,
+            },
+            timestamp,
+            ExplicitCongestionNotification::NotEct,
+            transmission::Mode::Normal,
+            None,
+            &mut context,
+            &mut publisher,
+        );
+    }
+    let _ = paths
+        .on_processed_packet(
+            old_id,
+            None,
+            frame::path_validation::Probe::NonProbing,
+            &mut random::testing::Generator(123),
+            &mut publisher,
+        )
+        .unwrap();
+    {
+        let mut context = MockContext::new(&mut paths);
+        manager.on_packet_sent(
+            space.new_packet_number(VarInt::from_u8(2)),
+            Outcome {
+                ack_elicitation: AckElicitation::NonEliciting,
+                is_congestion_controlled: false,
+                bytes_sent: 40,
+                bytes_progressed: 0,
+            },
+            timestamp + Duration::from_millis(10),
+            ExplicitCongestionNotification::NotEct,
+            transmission::Mode::Normal,
+            None,
+            &mut context,
+            &mut publisher,
+        );
+    }
+    let _ = paths
+        .on_processed_packet(
+            other_id,
+            None,
+            frame::path_validation::Probe::NonProbing,
+            &mut random::testing::Generator(123),
+            &mut publisher,
+        )
+        .unwrap();
+    for port in 2..=4 {
+        add_validated_path(
+            &mut paths,
+            port,
+            timestamp + Duration::from_millis(20),
+            &mut publisher,
+        );
+    }
+    assert_eq!(paths[old_id].congestion_controller.bytes_in_flight, 0);
+    let (new_address, new_id) = add_validated_path(
+        &mut paths,
+        5,
+        timestamp + Duration::from_millis(30),
+        &mut publisher,
+    );
+    assert_eq!(old_id, new_id);
+    // As the connection does when a new path takes over a slot
+    assert_eq!(paths.take_overwritten_path(), Some(new_id));
+    manager.forget_path(new_id);
+    let before = paths[new_id].rtt_estimator.smoothed_rtt();
+    let mut context = MockContext::new(&mut paths);
+    helper_ack_packets_on_path(
+        1..=2,
+        timestamp + Duration::from_millis(710),
+        &mut context,
+        &mut manager,
+        new_address,
+        None,
+        &mut publisher,
+    );
+    assert_eq!(
+        context.path().rtt_estimator.smoothed_rtt(),
+        before,
+        "an old ACK-only packet changed RTT on a path that has never sent a packet"
+    );
+}
+
+#[test]
+fn old_ack_only_losses_do_not_disable_replacement_ecn() {
+    let space = PacketNumberSpace::ApplicationData;
+    let mut publisher = Publisher::no_snapshot();
+    let mut manager = ServerManager::new(space);
+    let mut paths = helper_generate_path_manager(Duration::from_millis(10));
+    paths.active_path_mut().on_handshake_packet();
+    let timestamp = time::now() + Duration::from_secs(1);
+    let initial_id = paths.active_path_id();
+    let (old_address, old_id) = add_validated_path(&mut paths, 1, timestamp, &mut publisher);
+    paths[old_id].on_handshake_packet();
+    {
+        let mut context = MockContext::new(&mut paths);
+        for pn in 1..=10 {
+            manager.on_packet_sent(
+                space.new_packet_number(VarInt::from_u8(pn)),
+                Outcome {
+                    ack_elicitation: AckElicitation::NonEliciting,
+                    is_congestion_controlled: false,
+                    bytes_sent: 40,
+                    bytes_progressed: 0,
+                },
+                timestamp,
+                ExplicitCongestionNotification::Ect0,
+                transmission::Mode::Normal,
+                None,
+                &mut context,
+                &mut publisher,
+            );
+        }
+        helper_ack_packets_on_path(
+            1..=10,
+            timestamp + Duration::from_millis(10),
+            &mut context,
+            &mut manager,
+            old_address,
+            Some(EcnCounts {
+                ect_0_count: VarInt::from_u8(10),
+                ..Default::default()
+            }),
+            &mut publisher,
+        );
+        assert!(context.path().ecn_controller.is_capable());
+        for pn in 11..=21 {
+            let ecn = context.path_mut().ecn_controller.ecn(
+                transmission::Mode::Normal,
+                timestamp + Duration::from_millis(20),
+            );
+            assert_eq!(ecn, ExplicitCongestionNotification::Ect0);
+            manager.on_packet_sent(
+                space.new_packet_number(VarInt::from_u8(pn)),
+                Outcome {
+                    ack_elicitation: AckElicitation::NonEliciting,
+                    is_congestion_controlled: false,
+                    bytes_sent: 40,
+                    bytes_progressed: 0,
+                },
+                timestamp + Duration::from_millis(20),
+                ecn,
+                transmission::Mode::Normal,
+                None,
+                &mut context,
+                &mut publisher,
+            );
+        }
+    }
+    let _ = paths
+        .on_processed_packet(
+            initial_id,
+            None,
+            frame::path_validation::Probe::NonProbing,
+            &mut random::testing::Generator(123),
+            &mut publisher,
+        )
+        .unwrap();
+    for port in 2..=4 {
+        add_validated_path(
+            &mut paths,
+            port,
+            timestamp + Duration::from_millis(30),
+            &mut publisher,
+        );
+    }
+    {
+        let mut context = MockContext::new(&mut paths);
+        manager.on_packet_sent(
+            space.new_packet_number(VarInt::from_u8(22)),
+            Outcome {
+                ack_elicitation: AckElicitation::Eliciting,
+                is_congestion_controlled: true,
+                bytes_sent: 128,
+                bytes_progressed: 0,
+            },
+            timestamp + Duration::from_millis(35),
+            ExplicitCongestionNotification::NotEct,
+            transmission::Mode::Normal,
+            None,
+            &mut context,
+            &mut publisher,
+        );
+    }
+    assert_eq!(paths[old_id].congestion_controller.bytes_in_flight, 0);
+    let (new_address, new_id) = add_validated_path(
+        &mut paths,
+        5,
+        timestamp + Duration::from_millis(40),
+        &mut publisher,
+    );
+    assert_eq!(old_id, new_id);
+    assert_eq!(paths.take_overwritten_path(), Some(new_id));
+    manager.forget_path(new_id);
+    let now = timestamp + Duration::from_secs(1);
+    let mut context = MockContext::new(&mut paths);
+    helper_ack_packets_on_path(
+        22..=22,
+        now,
+        &mut context,
+        &mut manager,
+        new_address,
+        Some(EcnCounts {
+            ect_0_count: VarInt::from_u8(10),
+            ..Default::default()
+        }),
+        &mut publisher,
+    );
+    assert!(
+        context.lost_packets.is_empty(),
+        "the old path's packets were forgotten"
+    );
+    assert_eq!(
+        context
+            .path_mut()
+            .ecn_controller
+            .ecn(transmission::Mode::Normal, now),
+        ExplicitCongestionNotification::Ect0,
+        "losses of the old path's ACK-only packets disabled ECN on its replacement"
+    );
+}
