@@ -1316,3 +1316,37 @@ fn app_limited_flow_does_not_keep_a_stale_max_bw() {
         }
     }
 }
+
+// Losses flagged as persistent congestion leave the loss model unchanged
+#[test]
+fn persistent_congestion_does_not_reduce_the_model() {
+    let now = NoopClock.get_time();
+    let rtt_estimator = crate::recovery::RttEstimator::default();
+    let mut random = random::testing::Generator::default();
+
+    for persistent_congestion in [true, false] {
+        let mut bbr = BbrCongestionController::new(MINIMUM_MAX_DATAGRAM_SIZE, Default::default());
+        let mut publisher = event::testing::Publisher::no_snapshot();
+        let mut publisher = PathPublisher::new(&mut publisher, path::Id::test_id());
+        let sent: Vec<_> = (0..10)
+            .map(|_| bbr.on_packet_sent(now, 1200, Some(false), &rtt_estimator, &mut publisher))
+            .collect();
+        let cwnd = bbr.congestion_window();
+
+        for (index, packet_info) in sent.into_iter().enumerate() {
+            bbr.on_packet_lost(
+                1200,
+                packet_info,
+                persistent_congestion,
+                index == 0,
+                &mut random,
+                now + Duration::from_secs(1),
+                &mut publisher,
+            );
+        }
+
+        assert_eq!(bbr.bytes_in_flight(), 0);
+        assert_eq!(bbr.congestion_window(), cwnd);
+        assert_eq!(bbr.congestion_state.loss_in_round(), !persistent_congestion);
+    }
+}
