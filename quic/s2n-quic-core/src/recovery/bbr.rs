@@ -216,6 +216,9 @@ impl IntoEvent<event::builder::BbrState> for &State {
     }
 }
 
+/// App-limited rounds in Startup after which the max_bw filter advances one cycle
+const STARTUP_APP_LIMITED_ROUNDS_PER_CYCLE: u32 = 5;
+
 #[derive(Default, Debug, Clone, Copy)]
 pub struct ApplicationSettings {
     initial_congestion_window: Option<u32>,
@@ -278,6 +281,10 @@ pub struct BbrCongestionController {
     max_datagram_size: u16,
     /// A boolean that is true if and only if a connection is restarting after being idle
     idle_restart: bool,
+    /// Consecutive app-limited rounds in Startup
+    startup_app_limited_rounds: u32,
+    /// The max_bw filter was aged in Startup, so the pacing rate may decrease
+    pacing_reset_pending: bool,
     /// True if rate samples reflect bandwidth probing
     bw_probe_samples: bool,
     /// Controls the departure time and send quantum of packets
@@ -402,6 +409,23 @@ impl CongestionController for BbrCongestionController {
             self.ecn_state
                 .on_round_start(self.bw_estimator.delivered_bytes(), self.max_datagram_size);
             self.cwnd_limited_in_round = is_cwnd_limited;
+
+            // An app-limited sender may never leave Startup, where the max_bw filter
+            // does not otherwise advance
+            if self.state.is_startup() {
+                if self.bw_estimator.rate_sample().is_app_limited {
+                    self.startup_app_limited_rounds += 1;
+                    if self
+                        .startup_app_limited_rounds
+                        .is_multiple_of(STARTUP_APP_LIMITED_ROUNDS_PER_CYCLE)
+                    {
+                        self.data_rate_model.advance_max_bw_filter();
+                        self.pacing_reset_pending = true;
+                    }
+                } else {
+                    self.startup_app_limited_rounds = 0;
+                }
+            }
         }
 
         //= https://tools.ietf.org/id/draft-cardwell-iccrg-bbr-congestion-control-02#4.2.3
@@ -476,10 +500,12 @@ impl CongestionController for BbrCongestionController {
             //#   BBRSetPacingRate()
             //#   BBRSetSendQuantum()
             //#   BBRSetCwnd()
+            let follow_bw = self.full_pipe_estimator.filled_pipe()
+                || core::mem::take(&mut self.pacing_reset_pending);
             self.pacer.set_pacing_rate(
                 self.data_rate_model.bw(),
                 self.state.pacing_gain(&self.app_settings),
-                self.full_pipe_estimator.filled_pipe(),
+                follow_bw,
                 publisher,
             );
             self.pacer.set_send_quantum(self.max_datagram_size);
@@ -617,6 +643,8 @@ impl BbrCongestionController {
             data_volume_model: data_volume::Model::new(),
             max_datagram_size,
             idle_restart: false,
+            startup_app_limited_rounds: 0,
+            pacing_reset_pending: false,
             bw_probe_samples: false,
             pacer: Pacer::new(max_datagram_size, &app_settings),
             try_fast_path: false,
