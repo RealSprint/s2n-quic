@@ -66,6 +66,10 @@ pub struct Manager<Config: endpoint::Config> {
     /// Note that it doesn't prevent an on-path attacker from observing/forwarding
     /// authenticated packets from bogus addresses.
     pending_packet_authentication: Option<u8>,
+
+    /// A slot overwritten by a new path, until the connection has told recovery
+    /// to forget the old path's sent packets (see `take_overwritten_path`).
+    overwritten_path: Option<Id>,
 }
 
 impl<Config: endpoint::Config> Manager<Config> {
@@ -76,6 +80,7 @@ impl<Config: endpoint::Config> Manager<Config> {
             active: 0,
             last_known_active_validated_path: None,
             pending_packet_authentication: None,
+            overwritten_path: None,
         };
         manager.paths[0].activated = true;
         manager.paths[0].is_active = true;
@@ -485,12 +490,19 @@ impl<Config: endpoint::Config> Manager<Config> {
         // create a new path
         if new_path_idx < self.paths.len() {
             self.paths[new_path_idx] = path;
+            self.overwritten_path = Some(new_path_id);
         } else {
             self.paths.push(path);
         }
         self.pending_packet_authentication = Some(new_path_idx as _);
 
         Ok((new_path_id, amplification_outcome))
+    }
+
+    /// Returns the slot a new path last overwrote, if any. Sent packets recorded
+    /// for the old path must not be attributed to the new one.
+    pub fn take_overwritten_path(&mut self) -> Option<Id> {
+        self.overwritten_path.take()
     }
 
     /// A slot whose path can be dropped: not active, not the fallback path, and with

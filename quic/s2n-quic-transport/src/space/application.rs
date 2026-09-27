@@ -95,6 +95,11 @@ impl<Config: endpoint::Config> fmt::Debug for ApplicationSpace<Config> {
 }
 
 impl<Config: endpoint::Config> ApplicationSpace<Config> {
+    /// See [`recovery::Manager::forget_path`].
+    pub fn forget_path(&mut self, path_id: path::Id) {
+        self.recovery_manager.forget_path(path_id);
+    }
+
     pub fn new(
         key: <<Config::TLSEndpoint as tls::Endpoint>::Session as CryptoSuite>::OneRttKey,
         header_key: <<Config::TLSEndpoint as tls::Endpoint>::Session as CryptoSuite>::OneRttHeaderKey,
