@@ -1236,6 +1236,7 @@ impl<Config: endpoint::Config> connection::Trait for ConnectionImpl<Config> {
             &mut self.path_manager,
             random_generator,
             timestamp,
+            self.limits.max_pto_period(),
             &mut publisher,
         )?;
 

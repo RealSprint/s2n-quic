@@ -377,15 +377,21 @@ impl<Config: endpoint::Config> PacketSpaceManager<Config> {
         path_manager: &mut path::Manager<Config>,
         random_generator: &mut Config::RandomGenerator,
         timestamp: Timestamp,
+        max_pto_period: Option<core::time::Duration>,
         publisher: &mut Pub,
     ) -> Result<(), connection::Error> {
         let path_id = path_manager.active_path_id();
         let path = path_manager.active_path();
 
         // ensure the backoff doesn't grow too quickly
-        let max_backoff = path.pto_backoff.checked_mul(2).ok_or_else(|| {
+        let mut max_backoff = path.pto_backoff.checked_mul(2).ok_or_else(|| {
             connection::Error::immediate_close("PTO backoff multiplier exceeded maximum value")
         })?;
+        if let Some(max_pto_period) = max_pto_period {
+            let base = path
+                .base_pto_period(s2n_quic_core::packet::number::PacketNumberSpace::ApplicationData);
+            max_backoff = max_backoff.min(backoff_cap(base, max_pto_period));
+        }
 
         if let Some((space, handshake_status)) = self.initial_mut() {
             space.on_timeout(
@@ -1278,5 +1284,44 @@ impl<
             )
             .map_err(on_error)
             .err();
+    }
+}
+
+/// The largest PTO backoff multiplier that keeps `base x backoff` within
+/// `max_pto_period`; at least 1, so the cap never shortens the base PTO.
+fn backoff_cap(base: core::time::Duration, max_pto_period: core::time::Duration) -> u32 {
+    let base = base.as_micros().max(1);
+    let cap = max_pto_period.as_micros() / base;
+    u32::try_from(cap).unwrap_or(u32::MAX).max(1)
+}
+
+#[cfg(test)]
+mod backoff_cap_tests {
+    use super::backoff_cap;
+    use core::time::Duration;
+
+    #[test]
+    fn caps_the_backoff_at_the_max_period() {
+        // 200 ms base PTO, 1 s cap: the backoff stops at 5
+        assert_eq!(
+            backoff_cap(Duration::from_millis(200), Duration::from_secs(1)),
+            5
+        );
+        assert_eq!(
+            backoff_cap(Duration::from_millis(300), Duration::from_secs(1)),
+            3
+        );
+    }
+
+    #[test]
+    fn never_goes_below_one() {
+        assert_eq!(
+            backoff_cap(Duration::from_secs(2), Duration::from_secs(1)),
+            1
+        );
+        assert_eq!(
+            backoff_cap(Duration::ZERO, Duration::from_secs(1)),
+            1_000_000
+        );
     }
 }
