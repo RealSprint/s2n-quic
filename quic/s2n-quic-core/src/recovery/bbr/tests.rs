@@ -1188,3 +1188,131 @@ fn enter_probe_bw_state<Pub: Publisher>(
         probe_bw_state.set_cycle_phase_for_test(cycle_phase);
     }
 }
+
+/// Sends a bursty app-limited flow through a rate-limited link and
+/// returns the final congestion window. The path is local and fast until
+/// `fast_until`, then has the given rate and delay.
+fn app_limited_flow_cwnd(app_settings: bbr::ApplicationSettings, fast_until: Duration) -> u32 {
+    use crate::{
+        packet::number::PacketNumberSpace,
+        recovery::RttEstimator,
+        time::{Clock, NoopClock, Timestamp},
+    };
+    use std::collections::VecDeque;
+
+    const PACKET: usize = MINIMUM_MAX_DATAGRAM_SIZE as usize;
+    const LINK_BITS_PER_SECOND: u64 = 8_000_000;
+    const ONE_WAY: Duration = Duration::from_millis(30);
+    type Sent = (Timestamp, usize, PacketInfo);
+
+    let step = Duration::from_micros(100);
+    let mut bbr = BbrCongestionController::new(MINIMUM_MAX_DATAGRAM_SIZE, app_settings);
+    let mut publisher = event::testing::Publisher::no_snapshot();
+    let mut publisher = PathPublisher::new(&mut publisher, path::Id::test_id());
+    let mut rtt_estimator = RttEstimator::default();
+    let mut random = random::testing::Generator::default();
+
+    let start = NoopClock.get_time();
+    let mut queued = 0usize;
+    let mut link_free_at = start;
+    let mut to_receiver: VecDeque<(Timestamp, Sent)> = VecDeque::new();
+    let mut unacked: Vec<Sent> = Vec::new();
+    let mut acks: VecDeque<(Timestamp, Vec<Sent>)> = VecDeque::new();
+
+    for tick in 0..600_000u32 {
+        let now = start + step * tick;
+        let fast = now - start < fast_until;
+        let (one_way, serialization) = if fast {
+            (Duration::from_micros(50), Duration::from_nanos(1))
+        } else {
+            (
+                ONE_WAY,
+                Duration::from_nanos(PACKET as u64 * 8 * 1_000_000_000 / LINK_BITS_PER_SECOND),
+            )
+        };
+
+        // A burst every 33 ms, a larger one every second
+        if tick % 330 == 0 {
+            queued += if (tick / 330) % 30 == 0 {
+                100_000
+            } else {
+                7_500
+            };
+        }
+
+        while to_receiver.front().is_some_and(|(at, _)| *at <= now) {
+            unacked.push(to_receiver.pop_front().unwrap().1);
+            if unacked.len() == 2 {
+                acks.push_back((now + one_way, core::mem::take(&mut unacked)));
+            }
+        }
+
+        while acks.front().is_some_and(|(at, _)| *at <= now) {
+            let (_, packets) = acks.pop_front().unwrap();
+            let bytes = packets.iter().map(|(_, bytes, _)| bytes).sum();
+            let &(sent, _, info) = packets.last().unwrap();
+            rtt_estimator.update_rtt(
+                Duration::ZERO,
+                now - sent,
+                now,
+                true,
+                PacketNumberSpace::ApplicationData,
+            );
+            bbr.on_rtt_update(sent, now, &rtt_estimator, &mut publisher);
+            bbr.on_ack(
+                sent,
+                bytes,
+                info,
+                &rtt_estimator,
+                &mut random,
+                now,
+                &mut publisher,
+            );
+        }
+
+        while queued > 0
+            && bbr.bytes_in_flight() as usize + PACKET <= bbr.congestion_window() as usize
+            && bbr.earliest_departure_time().is_none_or(|edt| edt <= now)
+        {
+            let bytes = queued.min(PACKET);
+            queued -= bytes;
+            let cwnd_limited =
+                bbr.bytes_in_flight() as usize + bytes + PACKET > bbr.congestion_window() as usize;
+            let app_limited = !cwnd_limited && queued == 0;
+            let info = bbr.on_packet_sent(
+                now,
+                bytes,
+                Some(app_limited),
+                &rtt_estimator,
+                &mut publisher,
+            );
+            let delivered = (now + one_way).max(link_free_at) + serialization;
+            link_free_at = delivered;
+            to_receiver.push_back((delivered, (now, bytes, info)));
+        }
+    }
+
+    bbr.congestion_window()
+}
+
+// A max_bw sample from a faster period of the path must age out for an app-limited flow
+#[test]
+#[cfg_attr(miri, ignore)]
+fn app_limited_flow_does_not_keep_a_stale_max_bw() {
+    // 8 Mbit/s with a 60 ms RTT
+    let bdp = 60_000;
+
+    for initial_congestion_window in [None, Some(240_000)] {
+        let settings = bbr::ApplicationSettings {
+            initial_congestion_window,
+            ..Default::default()
+        };
+        for fast_until in [Duration::ZERO, Duration::from_millis(1500)] {
+            let cwnd = app_limited_flow_cwnd(settings, fast_until);
+            assert!(
+                cwnd <= 16 * bdp,
+                "initial window {initial_congestion_window:?}, fast until {fast_until:?}: cwnd {cwnd}"
+            );
+        }
+    }
+}

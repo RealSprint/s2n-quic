@@ -103,7 +103,11 @@ impl Model {
         //# reflect application limits.  However, the estimator does use application-limited samples
         //# if the measured delivery rate happens to be larger than the current BBR.max_bw estimate,
         //# since this indicates the current BBR.Max_bw estimate is too low.
-        if rate_sample.delivery_rate() > self.max_bw() || !rate_sample.is_app_limited {
+        // An app-limited sender rarely produces other samples, so an expired max_bw yields to any
+        if rate_sample.delivery_rate() > self.max_bw()
+            || !rate_sample.is_app_limited
+            || self.max_bw_filter.window_expired(self.cycle_count)
+        {
             self.max_bw_filter
                 .update(rate_sample.delivery_rate(), self.cycle_count);
         }
@@ -211,9 +215,17 @@ mod tests {
         rate_sample.is_app_limited = true;
         rate_sample.delivered_bytes = 50;
 
-        // The sample is app limited so the max stays the same
+        // The max has aged out, so even an app limited sample replaces it
         model.update_max_bw(rate_sample);
-        assert_eq!(bw, model.max_bw());
+        assert_eq!(rate_sample.delivery_rate(), model.max_bw());
+
+        // Within the window, a lower app limited sample does not
+        rate_sample.delivered_bytes = 25;
+        model.update_max_bw(rate_sample);
+        assert_eq!(
+            Bandwidth::new(50, Duration::from_millis(10)),
+            model.max_bw()
+        );
     }
 
     #[test]
