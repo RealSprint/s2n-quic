@@ -573,6 +573,16 @@ impl<Config: endpoint::Config> Path<Config> {
         self.rtt_estimator.pto_period(self.pto_backoff, space)
     }
 
+    /// Returns the PTO period without backoff or jitter: what the path's RTT
+    /// alone asks for, however many probes have gone unanswered.
+    #[inline]
+    pub fn base_pto_period(
+        &self,
+        space: s2n_quic_core::packet::number::PacketNumberSpace,
+    ) -> core::time::Duration {
+        self.rtt_estimator.pto_period(INITIAL_PTO_BACKOFF, space)
+    }
+
     /// Returns the current PTO period with jitter applied if configured
     #[inline]
     pub fn pto_period_with_jitter(
@@ -1300,6 +1310,37 @@ mod tests {
 
         // There isn't room for an MTU sized packet after including the 501 bytes, so the path is congestion limited
         assert!(path.is_congestion_limited(501));
+    }
+
+    #[test]
+    fn base_pto_period_ignores_the_backoff() {
+        use s2n_quic_core::{
+            connection::limits::ANTI_AMPLIFICATION_MULTIPLIER, packet::number::PacketNumberSpace,
+        };
+
+        let mut path = Path::new(
+            Default::default(),
+            connection::PeerId::try_from_bytes(&[]).unwrap(),
+            connection::LocalId::TEST_ID,
+            RttEstimator::new(Duration::from_millis(100)),
+            Default::default(),
+            false,
+            mtu::Config::default(),
+            ANTI_AMPLIFICATION_MULTIPLIER,
+            0,
+        );
+        let space = PacketNumberSpace::ApplicationData;
+        let base = path.pto_period(space);
+        assert_eq!(path.base_pto_period(space), base);
+
+        // A peer whose probes went unanswered six times: the PTO backs off 64x,
+        // the base period (which the idle timeout uses) does not.
+        path.pto_backoff = 64;
+        assert!(path.pto_period(space) > base * 32);
+        assert_eq!(path.base_pto_period(space), base);
+
+        path.reset_pto_backoff();
+        assert_eq!(path.pto_period(space), base);
     }
 
     #[test]
