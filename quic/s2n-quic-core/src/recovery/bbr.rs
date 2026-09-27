@@ -518,7 +518,7 @@ impl CongestionController for BbrCongestionController {
         &mut self,
         lost_bytes: u32,
         packet_info: Self::PacketInfo,
-        _persistent_congestion: bool,
+        persistent_congestion: bool,
         new_loss_burst: bool,
         random_generator: &mut dyn random::Generator,
         timestamp: Timestamp,
@@ -527,6 +527,14 @@ impl CongestionController for BbrCongestionController {
         debug_assert!(lost_bytes > 0);
 
         self.bytes_in_flight -= lost_bytes;
+
+        // Nothing was acknowledged for several PTOs: the path was unavailable, which says
+        // nothing about its capacity once it returns
+        if persistent_congestion {
+            self.bw_estimator.on_packet_discarded(lost_bytes as usize);
+            return;
+        }
+
         self.bw_estimator.on_loss(lost_bytes as usize);
         self.recovery_state.on_congestion_event(timestamp);
         self.congestion_state
