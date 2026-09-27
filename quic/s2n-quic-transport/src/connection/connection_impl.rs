@@ -484,7 +484,11 @@ impl<Config: endpoint::Config> ConnectionImpl<Config> {
         //# current Probe Timeout (PTO).  This allows for multiple PTOs to
         //# expire, and therefore multiple probes to be sent and lost, prior to
         //# idle timeout.
-        duration = duration.max(3 * self.current_pto().as_millis() as u64);
+        //
+        // The base PTO is used, as quinn does: with the backed-off PTO, a peer that
+        // goes silent while its ACKs are late keeps the connection (and the data
+        // sent to it) alive for up to the backoff factor times the idle timeout.
+        duration = duration.max(3 * self.base_pto().as_millis() as u64);
 
         Some(Duration::from_millis(duration))
     }
@@ -546,12 +550,17 @@ impl<Config: endpoint::Config> ConnectionImpl<Config> {
     }
 
     fn current_pto(&self) -> Duration {
-        // Return the base PTO period without jitter
-        // This is used for idle timeout calculations and other non-timer purposes
+        // The active path's PTO period including its backoff, without jitter
         self.path_manager
             .active_path()
             // Incorporate `max_ack_delay` into the timeout
             .pto_period(PacketNumberSpace::ApplicationData)
+    }
+
+    fn base_pto(&self) -> Duration {
+        self.path_manager
+            .active_path()
+            .base_pto_period(PacketNumberSpace::ApplicationData)
     }
 
     /// Send path validation frames for the non-active path.
