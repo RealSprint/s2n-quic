@@ -112,6 +112,7 @@ pub struct Limits {
     pub(crate) anti_amplification_multiplier: u8,
     pub(crate) stream_batch_size: u8,
     pub(crate) pto_jitter_percentage: u8,
+    pub(crate) max_pto_period: Option<Duration>,
     pub(crate) packet_buffer_size: usize,
 }
 
@@ -161,6 +162,7 @@ impl Limits {
             anti_amplification_multiplier: ANTI_AMPLIFICATION_MULTIPLIER,
             stream_batch_size: DEFAULT_STREAM_BATCH_SIZE,
             pto_jitter_percentage: DEFAULT_PTO_JITTER_PERCENTAGE,
+            max_pto_period: None,
             packet_buffer_size: DEFAULT_PACKET_BUFFER_SIZE,
         }
     }
@@ -395,6 +397,23 @@ impl Limits {
     #[inline]
     pub fn pto_jitter_percentage(&self) -> u8 {
         self.pto_jitter_percentage
+    }
+
+    /// Caps the PTO backoff: once `base PTO x backoff` would exceed this period,
+    /// the backoff stops growing. Off by default.
+    pub fn with_max_pto_period(mut self, value: Duration) -> Result<Self, ValidationError> {
+        ensure!(
+            !value.is_zero(),
+            Err(ValidationError("max PTO period must be non-zero"))
+        );
+        self.max_pto_period = Some(value);
+        Ok(self)
+    }
+
+    #[doc(hidden)]
+    #[inline]
+    pub fn max_pto_period(&self) -> Option<Duration> {
+        self.max_pto_period
     }
 
     // internal APIs
