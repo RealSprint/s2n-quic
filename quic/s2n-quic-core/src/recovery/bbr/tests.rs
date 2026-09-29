@@ -1302,7 +1302,8 @@ fn app_limited_flow_does_not_keep_a_stale_max_bw() {
     // 8 Mbit/s with a 60 ms RTT
     let bdp = 60_000;
 
-    for initial_congestion_window in [None, Some(240_000)] {
+    // The window stays at its Startup high-water mark, which the initial window sets
+    for (initial_congestion_window, max_bdps) in [(None, 4), (Some(240_000), 13)] {
         let settings = bbr::ApplicationSettings {
             initial_congestion_window,
             ..Default::default()
@@ -1310,7 +1311,7 @@ fn app_limited_flow_does_not_keep_a_stale_max_bw() {
         for fast_until in [Duration::ZERO, Duration::from_millis(1500)] {
             let cwnd = app_limited_flow_cwnd(settings, fast_until);
             assert!(
-                cwnd <= 16 * bdp,
+                cwnd <= max_bdps * bdp,
                 "initial window {initial_congestion_window:?}, fast until {fast_until:?}: cwnd {cwnd}"
             );
         }
