@@ -66,6 +66,12 @@ impl<'a> Request<'a> {
         self
     }
 
+    /// Sets the send priority of the tx stream. Higher values are sent first.
+    pub fn priority(&mut self, priority: i32) -> &mut Self {
+        self.tx_mut().priority = Some(priority);
+        self
+    }
+
     /// Requests data on the rx stream to be received into the provided slice of chunks
     pub fn receive(&mut self, chunks: &'a mut [bytes::Bytes]) -> &mut Self {
         self.rx_mut().chunks = Some(chunks);
@@ -196,6 +202,9 @@ pub mod tx {
         /// Marks the tx stream as detached, which makes the stream make progress, regardless of
         /// application observations.
         pub detached: bool,
+
+        /// Optionally sets the stream's send priority. Higher values are sent first.
+        pub priority: Option<i32>,
     }
 
     /// The result of a tx request
@@ -499,6 +508,7 @@ mod tests {
             .finish()
             .flush()
             .reset(application::Error::new(1).unwrap())
+            .priority(3)
             .receive(&mut receive_chunks)
             .with_watermark(5, 10)
             .stop_sending(application::Error::new(2).unwrap());
@@ -512,6 +522,7 @@ mod tests {
                     flush: true,
                     reset: Some(reset),
                     detached: false,
+                    priority: Some(3),
                 }),
                 rx: Some(rx::Request {
                     chunks: Some(rx_chunks),

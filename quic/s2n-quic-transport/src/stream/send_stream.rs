@@ -457,6 +457,8 @@ pub struct SendStream {
     final_state_observed: bool,
     /// Marks the stream as detached from the application
     detached: bool,
+    /// Send priority among the connection's streams; higher is sent first
+    priority: i32,
 }
 
 impl SendStream {
@@ -485,6 +487,7 @@ impl SendStream {
             write_waiter: None,
             final_state_observed: is_closed,
             detached: is_closed,
+            priority: 0,
         };
 
         if is_closed {
@@ -753,6 +756,10 @@ impl SendStream {
 
         if request.detached {
             self.detach();
+        }
+
+        if let Some(priority) = request.priority {
+            self.priority = priority;
         }
 
         macro_rules! store_waker {
@@ -1028,6 +1035,7 @@ impl timer::Provider for SendStream {
 impl StreamInterestProvider for SendStream {
     #[inline]
     fn stream_interests(&self, interests: &mut StreamInterests) {
+        interests.priority = self.priority;
         match self.state {
             //= https://www.rfc-editor.org/rfc/rfc9000#section-3.3
             //# A sender MUST NOT send any of these frames from a terminal state

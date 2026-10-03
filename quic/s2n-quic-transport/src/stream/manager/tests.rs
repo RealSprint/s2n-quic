@@ -104,6 +104,7 @@ impl MockStream {
 impl StreamInterestProvider for MockStream {
     fn stream_interests(&self, interests: &mut StreamInterests) {
         interests.merge(&self.interests);
+        interests.priority = self.interests.priority;
 
         interests.connection_flow_control_credits |=
             self.on_connection_window_available_retrieve_window > 0;
@@ -3235,6 +3236,137 @@ fn stream_transmission_fairness_test() {
             streams.rotate_left(1);
         }
     }
+}
+
+#[test]
+fn stream_priority_orders_the_transmission_list() {
+    let mut manager = create_stream_manager(endpoint::Type::Server);
+
+    let streams: Vec<_> = (0..4)
+        .map(|_| try_open(&mut manager, StreamType::Bidirectional).unwrap())
+        .collect();
+
+    for (stream_id, priority) in streams.iter().zip([0, 5, 0, 5]) {
+        manager.with_asserted_stream(*stream_id, |stream| {
+            stream.on_transmit_try_write_frames = 100;
+            stream.on_transmit_limit = Some(1);
+            stream.interests.priority = priority;
+        });
+    }
+
+    // higher priority first, creation order within a priority
+    assert_eq!(
+        [streams[1], streams[3], streams[0], streams[2]],
+        *manager.streams_waiting_for_transmission()
+    );
+
+    let mut frame_buffer = OutgoingFrameBuffer::new();
+    let mut write_context = MockWriteContext::new(
+        time::now(),
+        &mut frame_buffer,
+        transmission::Constraint::None,
+        transmission::Mode::Normal,
+        endpoint::Type::Server,
+    );
+
+    // only the higher priority streams send, in round-robin order
+    for _ in 0..6 {
+        write_context.frame_buffer.set_error_write_after_n_frames(1);
+        let _ = manager.on_transmit(&mut write_context);
+        write_context.frame_buffer.flush();
+    }
+    let remaining: Vec<_> = streams
+        .iter()
+        .map(|id| manager.with_asserted_stream(*id, |stream| stream.on_transmit_try_write_frames))
+        .collect();
+    assert_eq!(remaining[0], 100);
+    assert_eq!(remaining[2], 100);
+    assert!(remaining[1] < 100 && remaining[1].abs_diff(remaining[3]) <= 1);
+
+    // changing the priority moves a stream that is already queued
+    manager.with_asserted_stream(streams[2], |stream| {
+        stream.interests.priority = 10;
+    });
+    manager.with_asserted_stream(streams[1], |stream| {
+        stream.interests.priority = -1;
+    });
+    assert_eq!(
+        [streams[2], streams[3], streams[0], streams[1]],
+        *manager.streams_waiting_for_transmission()
+    );
+}
+
+#[test]
+fn stream_priority_request_orders_transmission() {
+    let mut manager = AbstractStreamManager::<stream::StreamImpl>::new(
+        &ConnectionLimits::default(),
+        endpoint::Type::Server,
+        create_default_initial_flow_control_limits(),
+        create_default_initial_flow_control_limits(),
+        DEFAULT_INITIAL_RTT,
+    );
+
+    let stream_ids: Vec<StreamId> = (0..3)
+        .map(|_| {
+            let (accept_waker, _accept_wake_counter) = new_count_waker();
+            let (_wakeup_queue, wakeup_handle) = create_wakeup_queue_and_handle();
+            let mut token = connection::OpenToken::new();
+
+            match manager.poll_open_local_stream(
+                StreamType::Unidirectional,
+                &mut token,
+                &mut ConnectionApiCallContext::from_wakeup_handle(&wakeup_handle),
+                &Context::from_waker(&accept_waker),
+            ) {
+                Poll::Ready(res) => res.unwrap(),
+                Poll::Pending => panic!("stream should open"),
+            }
+        })
+        .collect();
+
+    for stream_id in &stream_ids {
+        manager
+            .with_asserted_stream(*stream_id, |stream: &mut stream::StreamImpl| {
+                let data = bytes::Bytes::from_static(&[1; 2000]);
+                stream.poll_request(ops::Request::default().send(&mut [data]), None)
+            })
+            .unwrap();
+    }
+
+    manager
+        .with_asserted_stream(stream_ids[2], |stream: &mut stream::StreamImpl| {
+            stream.poll_request(ops::Request::default().priority(1), None)
+        })
+        .unwrap();
+    assert_eq!(
+        [stream_ids[2], stream_ids[0], stream_ids[1]],
+        *manager.streams_waiting_for_transmission()
+    );
+
+    let mut frame_buffer = OutgoingFrameBuffer::new();
+    frame_buffer.set_max_packet_size(Some(50));
+    let mut write_context = MockWriteContext::new(
+        time::now(),
+        &mut frame_buffer,
+        transmission::Constraint::None,
+        transmission::Mode::Normal,
+        endpoint::Type::Server,
+    );
+
+    for _ in 0..10 {
+        let _ = manager.on_transmit(&mut write_context);
+        write_context.frame_buffer.flush();
+    }
+
+    // only the higher priority stream sent data
+    let mut sent = 0;
+    while let Some(mut frame) = write_context.frame_buffer.pop_front() {
+        if let Frame::Stream(frame) = frame.as_frame() {
+            assert_eq!(frame.stream_id, stream_ids[2].as_varint());
+            sent += 1;
+        }
+    }
+    assert!(sent > 0);
 }
 
 #[test]

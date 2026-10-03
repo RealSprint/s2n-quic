@@ -22,6 +22,8 @@ pub struct StreamInterests {
     pub delivery_notifications: bool,
     /// Transmission interest for the component
     pub transmission: Interest,
+    /// Send priority; streams with higher values are sent first
+    pub priority: i32,
 }
 
 impl StreamInterests {
