@@ -13,7 +13,10 @@ use crate::{
     transmission,
 };
 use alloc::rc::Rc;
-use core::{cell::RefCell, ops::Deref};
+use core::{
+    cell::{Cell, RefCell},
+    ops::Deref,
+};
 use intrusive_collections::{
     intrusive_adapter, KeyAdapter, LinkedList, LinkedListLink, RBTree, RBTreeLink,
 };
@@ -79,6 +82,8 @@ struct StreamNode<S> {
     waiting_for_connection_flow_control_credits_link: LinkedListLink,
     /// Allows the Stream to be part of the `waiting_for_stream_flow_control_credits` collection
     waiting_for_stream_flow_control_credits_link: LinkedListLink,
+    /// The priority the Stream was queued with in `waiting_for_transmission`
+    priority: Cell<i32>,
 }
 
 impl<S> StreamNode<S> {
@@ -93,6 +98,7 @@ impl<S> StreamNode<S> {
             waiting_for_retransmission_link: LinkedListLink::new(),
             waiting_for_connection_flow_control_credits_link: LinkedListLink::new(),
             waiting_for_stream_flow_control_credits_link: LinkedListLink::new(),
+            priority: Cell::new(0),
         }
     }
 }
@@ -169,6 +175,25 @@ impl<S: StreamTrait> InterestLists<S> {
         }
     }
 
+    /// Queues a Stream for transmission behind all Streams of the same or a
+    /// higher priority
+    fn queue_for_transmission(&mut self, node: Rc<StreamNode<S>>) {
+        let priority = node.priority.get();
+        let mut cursor = self.waiting_for_transmission.back_mut();
+        while cursor
+            .get()
+            .is_some_and(|other| other.priority.get() < priority)
+        {
+            cursor.move_prev();
+        }
+        // At the null position this inserts at the front
+        cursor.insert_after(node);
+    }
+
+    fn queue_for_retransmission(&mut self, node: Rc<StreamNode<S>>) {
+        self.waiting_for_retransmission.push_back(node);
+    }
+
     /// Update all interest lists based on latest interest reported by a Node
     fn update_interests(&mut self, node: &Rc<StreamNode<S>>, interests: StreamInterests) -> bool {
         // Note that all comparisons start by checking whether the stream is
@@ -203,11 +228,20 @@ impl<S: StreamTrait> InterestLists<S> {
             waiting_for_frame_delivery_link,
             waiting_for_frame_delivery
         );
-        sync_interests!(
-            matches!(interests.transmission, transmission::Interest::NewData),
-            waiting_for_transmission_link,
-            waiting_for_transmission
-        );
+        let wants_transmission = matches!(interests.transmission, transmission::Interest::NewData);
+        let is_queued = node.waiting_for_transmission_link.is_linked();
+        let reprioritized = node.priority.replace(interests.priority) != interests.priority;
+        if is_queued && (!wants_transmission || reprioritized) {
+            // Safety: see `sync_interests`
+            let mut cursor = unsafe {
+                self.waiting_for_transmission
+                    .cursor_mut_from_ptr(node.deref() as *const StreamNode<S>)
+            };
+            cursor.remove();
+        }
+        if wants_transmission && !node.waiting_for_transmission_link.is_linked() {
+            self.queue_for_transmission(node.clone());
+        }
         sync_interests!(
             matches!(interests.transmission, transmission::Interest::LostData),
             waiting_for_retransmission_link,
@@ -330,11 +364,12 @@ macro_rules! send_on_transmission_list {
         $func:ident,
         $counter:ident,
         $interest_type:pat,
+        $requeue:ident,
     ) => {
         // Head node gets pushed to the back of the list if it has run out of sending credits
         if $sel.interest_lists.$counter >= $sel.interest_lists.transmission_limit {
             if let Some(node) = $sel.interest_lists.$list_name.pop_front() {
-                $sel.interest_lists.$list_name.push_back(node);
+                $sel.interest_lists.$requeue(node);
                 $sel.interest_lists.$counter = 0;
             }
         }
@@ -615,6 +650,7 @@ impl<S: StreamTrait> StreamContainer<S> {
             func,
             transmission_counter,
             transmission::Interest::NewData,
+            queue_for_transmission,
         );
     }
 
@@ -655,6 +691,7 @@ impl<S: StreamTrait> StreamContainer<S> {
             func,
             retransmission_counter,
             transmission::Interest::LostData,
+            queue_for_retransmission,
         );
     }
 

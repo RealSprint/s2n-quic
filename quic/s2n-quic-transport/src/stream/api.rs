@@ -224,6 +224,12 @@ macro_rules! tx_stream_apis {
             self.tx_request()?.reset(error_code).poll(None)?;
             Ok(())
         }
+
+        /// Sets the send priority of the stream. Higher values are sent first.
+        pub fn set_priority(&mut self, priority: i32) -> Result<(), StreamError> {
+            self.tx_request()?.priority(priority).poll(None)?;
+            Ok(())
+        }
     };
 }
 
@@ -487,6 +493,11 @@ macro_rules! tx_request_apis {
 
         pub fn reset(&mut self, error_code: application::Error) -> &mut Self {
             self.request.reset(error_code);
+            self
+        }
+
+        pub fn priority(&mut self, priority: i32) -> &mut Self {
+            self.request.priority(priority);
             self
         }
 
