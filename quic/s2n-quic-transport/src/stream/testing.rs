@@ -116,6 +116,7 @@ pub fn pn(nr: usize) -> PacketNumber {
 /// - tx => transmission::Interest::NewData
 /// - fin => finalization
 /// - cf => connection_flow_control_credits
+/// - reset => a pending reset, which is sent at the highest priority
 pub fn stream_interests(interests: &[&str]) -> StreamInterests {
     let mut result = StreamInterests {
         retained: true,
@@ -129,6 +130,7 @@ pub fn stream_interests(interests: &[&str]) -> StreamInterests {
             "fin" => result.retained = false,
             "cf" => result.connection_flow_control_credits = true,
             "sf" => result.stream_flow_control_credits = true,
+            "reset" => result.priority = i32::MAX,
             other => unreachable!("Unsupported interest {}", other),
         }
     }

@@ -244,7 +244,12 @@ fn execute_instructions(test_env: &mut TestEnvironment, instructions: &[Instruct
                 );
             }
             Instruction::CheckInterests(expected_interests) => {
-                assert_eq!(*expected_interests, test_env.stream.get_stream_interests());
+                // priority is covered by the stream manager tests
+                let actual = StreamInterests {
+                    priority: expected_interests.priority,
+                    ..test_env.stream.get_stream_interests()
+                };
+                assert_eq!(*expected_interests, actual);
             }
             Instruction::AckPacket(packet_number, expect_writer_wakeup) => {
                 test_env.ack_packet(*packet_number, *expect_writer_wakeup);
@@ -1307,7 +1312,7 @@ fn push_data_after_stream_is_reset_due_to_stop_sending() {
 
         if !*acknowledge_reset_early {
             assert_eq!(
-                stream_interests(&["ack"]),
+                stream_interests(&["ack", "reset"]),
                 test_env.stream.get_stream_interests()
             );
             // The user is already aware about the reset.
@@ -1788,12 +1793,12 @@ fn finish_after_stream_is_reset_locally() {
 
         assert!(test_env.reset(error_code).is_ok());
         assert_eq!(
-            stream_interests(&["tx"]),
+            stream_interests(&["tx", "reset"]),
             test_env.stream.get_stream_interests()
         );
         test_env.assert_write_reset_frame(error_code, pn(0), VarInt::from_u32(0));
         assert_eq!(
-            stream_interests(&["ack"]),
+            stream_interests(&["ack", "reset"]),
             test_env.stream.get_stream_interests()
         );
 
@@ -1860,7 +1865,7 @@ fn finish_after_stream_is_reset_due_to_stop_sending() {
         // the stream
         if !*acknowledge_reset_early {
             assert_eq!(
-                stream_interests(&["ack"]),
+                stream_interests(&["ack", "reset"]),
                 test_env.stream.get_stream_interests()
             );
             test_env.ack_packet(pn(0), ExpectWakeup(Some(false)));

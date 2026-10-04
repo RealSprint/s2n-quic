@@ -762,8 +762,18 @@ impl SendStream {
             self.priority = priority;
         }
 
-        // A priority-only request leaves the stream state alone
-        if request.is_priority_only() {
+        // A priority-only request reports the status and leaves the stream state alone
+        if request.is_priority_only() && context.is_none() {
+            response.status = match self.state {
+                SendStreamState::ResetSent(_) => ops::Status::Resetting,
+                SendStreamState::ResetAcknowledged(error) => ops::Status::Reset(error),
+                SendStreamState::Sending => match self.data_sender.state() {
+                    data_sender::State::Sending => ops::Status::Open,
+                    data_sender::State::Finishing(_) => ops::Status::Finishing,
+                    data_sender::State::Finished => ops::Status::Finished,
+                    data_sender::State::Cancelled(error) => ops::Status::Reset(error),
+                },
+            };
             return Ok(response);
         }
 
@@ -1058,6 +1068,8 @@ impl StreamInterestProvider for SendStream {
             //# STREAM_DATA_BLOCKED frame for a stream in the "Reset Sent" state or
             //# any terminal state -- that is, after sending a RESET_STREAM frame.
             SendStreamState::ResetSent(_) => {
+                // A pending reset goes ahead of data on other streams
+                interests.priority = i32::MAX;
                 interests.with_transmission(|query| self.reset_sync.transmission_interest(query))
             }
             _ => interests.with_transmission(|query| {

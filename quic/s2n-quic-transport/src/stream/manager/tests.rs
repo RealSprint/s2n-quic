@@ -410,7 +410,6 @@ fn create_stream_manager(local_ep_type: endpoint::Type) -> AbstractStreamManager
     )
 }
 
-/// Tries to open a new stream and returns an error if we're at the limit
 /// A server stream manager with real streams and default limits
 fn create_stream_impl_manager() -> AbstractStreamManager<stream::StreamImpl> {
     AbstractStreamManager::<stream::StreamImpl>::new(
@@ -422,6 +421,7 @@ fn create_stream_impl_manager() -> AbstractStreamManager<stream::StreamImpl> {
     )
 }
 
+/// Tries to open a new stream and returns an error if we're at the limit
 fn try_open<S: StreamTrait + 'static>(
     manager: &mut AbstractStreamManager<S>,
     stream_type: StreamType,
@@ -3371,14 +3371,52 @@ fn stream_priority_request_on_a_reset_stream() {
         })
         .unwrap();
 
-    // only the priority changes; the reset is not reported as observed
+    // only the priority changes; the reset is reported, not observed
     let response = manager
         .with_asserted_stream(stream_id, |stream: &mut stream::StreamImpl| {
             stream.poll_request(ops::Request::default().priority(1), None)
         })
         .unwrap();
-    assert!(response.tx().is_some());
+    assert_eq!(ops::Status::Resetting, response.tx().unwrap().status);
     assert!(manager.active_streams().contains(&stream_id));
+}
+
+#[test]
+fn stream_priority_sends_a_reset_first() {
+    let mut manager = create_stream_impl_manager();
+    let stream_ids: Vec<StreamId> = (0..2)
+        .map(|_| try_open(&mut manager, StreamType::Unidirectional).unwrap())
+        .collect();
+
+    for (stream_id, priority) in stream_ids.iter().zip([5, 0]) {
+        manager
+            .with_asserted_stream(*stream_id, |stream: &mut stream::StreamImpl| {
+                let data = bytes::Bytes::from_static(&[1; 2000]);
+                stream.poll_request(
+                    ops::Request::default().priority(priority).send(&mut [data]),
+                    None,
+                )
+            })
+            .unwrap();
+    }
+    assert_eq!(
+        [stream_ids[0], stream_ids[1]],
+        *manager.streams_waiting_for_transmission()
+    );
+
+    // the lower priority stream's reset goes ahead of the other stream's data
+    manager
+        .with_asserted_stream(stream_ids[1], |stream: &mut stream::StreamImpl| {
+            stream.poll_request(
+                ops::Request::default().reset(s2n_quic_core::application::Error::new(1).unwrap()),
+                None,
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        [stream_ids[1], stream_ids[0]],
+        *manager.streams_waiting_for_transmission()
+    );
 }
 
 #[test]
