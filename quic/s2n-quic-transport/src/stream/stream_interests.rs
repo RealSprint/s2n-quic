@@ -22,7 +22,8 @@ pub struct StreamInterests {
     pub delivery_notifications: bool,
     /// Transmission interest for the component
     pub transmission: Interest,
-    /// Send priority; streams with higher values are sent first
+    /// Send priority; streams with higher values are sent first. Not combined
+    /// by [`Self::merge`]: the provider sets it.
     pub priority: i32,
 }
 

@@ -82,7 +82,7 @@ struct StreamNode<S> {
     waiting_for_connection_flow_control_credits_link: LinkedListLink,
     /// Allows the Stream to be part of the `waiting_for_stream_flow_control_credits` collection
     waiting_for_stream_flow_control_credits_link: LinkedListLink,
-    /// The priority the Stream was queued with in `waiting_for_transmission`
+    /// The priority the Stream was queued with in the (re)transmission lists
     priority: Cell<i32>,
 }
 
@@ -127,6 +127,28 @@ unsafe fn stream_node_rc_from_ref<S>(stream_node: &StreamNode<S>) -> Rc<StreamNo
         Rc::<StreamNode<S>>::from_raw(stream_node as *const StreamNode<S>),
     );
     temp_node_ptr.deref().clone()
+}
+
+/// Inserts a node behind all nodes of the same or a higher priority. Returns
+/// whether it went in front of an existing head, which then hands the head's
+/// batch counter to a different Stream.
+macro_rules! insert_by_priority {
+    ($list:expr, $node:expr) => {{
+        let node = $node;
+        let priority = node.priority.get();
+        let had_head = !$list.is_empty();
+        let mut cursor = $list.back_mut();
+        while cursor
+            .get()
+            .is_some_and(|other| other.priority.get() < priority)
+        {
+            cursor.move_prev();
+        }
+        let new_head = had_head && cursor.is_null();
+        // At the null position this inserts at the front
+        cursor.insert_after(node);
+        new_head
+    }};
 }
 
 /// Contains all secondary lists of Streams.
@@ -178,20 +200,17 @@ impl<S: StreamTrait> InterestLists<S> {
     /// Queues a Stream for transmission behind all Streams of the same or a
     /// higher priority
     fn queue_for_transmission(&mut self, node: Rc<StreamNode<S>>) {
-        let priority = node.priority.get();
-        let mut cursor = self.waiting_for_transmission.back_mut();
-        while cursor
-            .get()
-            .is_some_and(|other| other.priority.get() < priority)
-        {
-            cursor.move_prev();
+        if insert_by_priority!(self.waiting_for_transmission, node) {
+            self.transmission_counter = 0;
         }
-        // At the null position this inserts at the front
-        cursor.insert_after(node);
     }
 
+    /// Queues a Stream for retransmission behind all Streams of the same or a
+    /// higher priority
     fn queue_for_retransmission(&mut self, node: Rc<StreamNode<S>>) {
-        self.waiting_for_retransmission.push_back(node);
+        if insert_by_priority!(self.waiting_for_retransmission, node) {
+            self.retransmission_counter = 0;
+        }
     }
 
     /// Update all interest lists based on latest interest reported by a Node
@@ -248,7 +267,9 @@ impl<S: StreamTrait> InterestLists<S> {
         sync_interests!(
             matches!(interests.transmission, transmission::Interest::LostData),
             waiting_for_retransmission_link,
-            waiting_for_retransmission
+            waiting_for_retransmission,
+            reprioritized,
+            self.queue_for_retransmission(node.clone())
         );
         sync_interests!(
             interests.connection_flow_control_credits,
