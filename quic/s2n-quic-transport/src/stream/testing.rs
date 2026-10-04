@@ -116,7 +116,7 @@ pub fn pn(nr: usize) -> PacketNumber {
 /// - tx => transmission::Interest::NewData
 /// - fin => finalization
 /// - cf => connection_flow_control_credits
-/// - reset => a pending reset, which is sent at the highest priority
+/// - reset => a pending RESET_STREAM, which is sent at the highest priority
 pub fn stream_interests(interests: &[&str]) -> StreamInterests {
     let mut result = StreamInterests {
         retained: true,

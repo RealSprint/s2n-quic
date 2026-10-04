@@ -762,21 +762,6 @@ impl SendStream {
             self.priority = priority;
         }
 
-        // A priority-only request reports the status and leaves the stream state alone
-        if request.is_priority_only() && context.is_none() {
-            response.status = match self.state {
-                SendStreamState::ResetSent(_) => ops::Status::Resetting,
-                SendStreamState::ResetAcknowledged(error) => ops::Status::Reset(error),
-                SendStreamState::Sending => match self.data_sender.state() {
-                    data_sender::State::Sending => ops::Status::Open,
-                    data_sender::State::Finishing(_) => ops::Status::Finishing,
-                    data_sender::State::Finished => ops::Status::Finished,
-                    data_sender::State::Cancelled(error) => ops::Status::Reset(error),
-                },
-            };
-            return Ok(response);
-        }
-
         macro_rules! store_waker {
             ($should_flush:expr) => {
                 // Store the waker, in order to be able to wakeup the caller
@@ -823,6 +808,17 @@ impl SendStream {
         // Do some state checks here. Only write data when the client is still
         // allowed to write (not reset).
         match self.state {
+            // A priority-only request reports the reset without observing it
+            SendStreamState::ResetSent(_) if request.is_priority_only() && context.is_none() => {
+                response.status = ops::Status::Resetting;
+                return Ok(response);
+            }
+            SendStreamState::ResetAcknowledged(error)
+                if request.is_priority_only() && context.is_none() =>
+            {
+                response.status = ops::Status::Reset(error);
+                return Ok(response);
+            }
             SendStreamState::ResetSent(error) | SendStreamState::ResetAcknowledged(error) => {
                 // The reset is now known to have been read by the client.
                 self.final_state_observed = true;
@@ -1068,7 +1064,8 @@ impl StreamInterestProvider for SendStream {
             //# STREAM_DATA_BLOCKED frame for a stream in the "Reset Sent" state or
             //# any terminal state -- that is, after sending a RESET_STREAM frame.
             SendStreamState::ResetSent(_) => {
-                // A pending reset goes ahead of data on other streams
+                // A pending RESET_STREAM goes ahead of data on other streams. Receive side
+                // frames of the stream keep its priority.
                 interests.priority = i32::MAX;
                 interests.with_transmission(|query| self.reset_sync.transmission_interest(query))
             }

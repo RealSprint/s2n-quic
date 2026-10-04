@@ -421,6 +421,19 @@ fn create_stream_impl_manager() -> AbstractStreamManager<stream::StreamImpl> {
     )
 }
 
+/// Polls a request on a real stream and returns its response
+fn poll_tx(
+    manager: &mut AbstractStreamManager<stream::StreamImpl>,
+    stream_id: StreamId,
+    request: &mut ops::Request,
+) -> ops::Response {
+    manager
+        .with_asserted_stream(stream_id, |stream: &mut stream::StreamImpl| {
+            stream.poll_request(request, None)
+        })
+        .unwrap()
+}
+
 /// Tries to open a new stream and returns an error if we're at the limit
 fn try_open<S: StreamTrait + 'static>(
     manager: &mut AbstractStreamManager<S>,
@@ -3316,19 +3329,19 @@ fn stream_priority_request_orders_transmission() {
         .collect();
 
     for stream_id in &stream_ids {
-        manager
-            .with_asserted_stream(*stream_id, |stream: &mut stream::StreamImpl| {
-                let data = bytes::Bytes::from_static(&[1; 2000]);
-                stream.poll_request(ops::Request::default().send(&mut [data]), None)
-            })
-            .unwrap();
+        let mut data = [bytes::Bytes::from_static(&[1; 2000])];
+        poll_tx(
+            &mut manager,
+            *stream_id,
+            ops::Request::default().send(&mut data),
+        );
     }
 
-    manager
-        .with_asserted_stream(stream_ids[2], |stream: &mut stream::StreamImpl| {
-            stream.poll_request(ops::Request::default().priority(1), None)
-        })
-        .unwrap();
+    poll_tx(
+        &mut manager,
+        stream_ids[2],
+        ops::Request::default().priority(1),
+    );
     assert_eq!(
         [stream_ids[2], stream_ids[0], stream_ids[1]],
         *manager.streams_waiting_for_transmission()
@@ -3362,21 +3375,14 @@ fn stream_priority_request_on_a_reset_stream() {
     let mut manager = create_stream_impl_manager();
     let stream_id = try_open(&mut manager, StreamType::Unidirectional).unwrap();
 
-    manager
-        .with_asserted_stream(stream_id, |stream: &mut stream::StreamImpl| {
-            stream.poll_request(
-                ops::Request::default().reset(s2n_quic_core::application::Error::new(1).unwrap()),
-                None,
-            )
-        })
-        .unwrap();
+    poll_tx(
+        &mut manager,
+        stream_id,
+        ops::Request::default().reset(s2n_quic_core::application::Error::new(1).unwrap()),
+    );
 
     // only the priority changes; the reset is reported, not observed
-    let response = manager
-        .with_asserted_stream(stream_id, |stream: &mut stream::StreamImpl| {
-            stream.poll_request(ops::Request::default().priority(1), None)
-        })
-        .unwrap();
+    let response = poll_tx(&mut manager, stream_id, ops::Request::default().priority(1));
     assert_eq!(ops::Status::Resetting, response.tx().unwrap().status);
     assert!(manager.active_streams().contains(&stream_id));
 }
@@ -3389,15 +3395,12 @@ fn stream_priority_sends_a_reset_first() {
         .collect();
 
     for (stream_id, priority) in stream_ids.iter().zip([5, 0]) {
-        manager
-            .with_asserted_stream(*stream_id, |stream: &mut stream::StreamImpl| {
-                let data = bytes::Bytes::from_static(&[1; 2000]);
-                stream.poll_request(
-                    ops::Request::default().priority(priority).send(&mut [data]),
-                    None,
-                )
-            })
-            .unwrap();
+        let mut data = [bytes::Bytes::from_static(&[1; 2000])];
+        poll_tx(
+            &mut manager,
+            *stream_id,
+            ops::Request::default().priority(priority).send(&mut data),
+        );
     }
     assert_eq!(
         [stream_ids[0], stream_ids[1]],
@@ -3405,14 +3408,11 @@ fn stream_priority_sends_a_reset_first() {
     );
 
     // the lower priority stream's reset goes ahead of the other stream's data
-    manager
-        .with_asserted_stream(stream_ids[1], |stream: &mut stream::StreamImpl| {
-            stream.poll_request(
-                ops::Request::default().reset(s2n_quic_core::application::Error::new(1).unwrap()),
-                None,
-            )
-        })
-        .unwrap();
+    poll_tx(
+        &mut manager,
+        stream_ids[1],
+        ops::Request::default().reset(s2n_quic_core::application::Error::new(1).unwrap()),
+    );
     assert_eq!(
         [stream_ids[1], stream_ids[0]],
         *manager.streams_waiting_for_transmission()

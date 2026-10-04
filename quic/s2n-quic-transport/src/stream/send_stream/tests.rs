@@ -244,7 +244,8 @@ fn execute_instructions(test_env: &mut TestEnvironment, instructions: &[Instruct
                 );
             }
             Instruction::CheckInterests(expected_interests) => {
-                // priority is covered by the stream manager tests
+                // these cases check stream state; priority is checked by the stream manager
+                // tests and the direct assertions using the "reset" interest
                 let actual = StreamInterests {
                     priority: expected_interests.priority,
                     ..test_env.stream.get_stream_interests()
