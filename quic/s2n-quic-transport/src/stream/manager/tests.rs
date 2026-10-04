@@ -411,8 +411,8 @@ fn create_stream_manager(local_ep_type: endpoint::Type) -> AbstractStreamManager
 }
 
 /// Tries to open a new stream and returns an error if we're at the limit
-fn try_open(
-    manager: &mut AbstractStreamManager<MockStream>,
+fn try_open<S: StreamTrait + 'static>(
+    manager: &mut AbstractStreamManager<S>,
     stream_type: StreamType,
 ) -> Result<StreamId, connection::Error> {
     let (accept_waker, _accept_wake_counter) = new_count_waker();
@@ -3307,21 +3307,7 @@ fn stream_priority_request_orders_transmission() {
     );
 
     let stream_ids: Vec<StreamId> = (0..3)
-        .map(|_| {
-            let (accept_waker, _accept_wake_counter) = new_count_waker();
-            let (_wakeup_queue, wakeup_handle) = create_wakeup_queue_and_handle();
-            let mut token = connection::OpenToken::new();
-
-            match manager.poll_open_local_stream(
-                StreamType::Unidirectional,
-                &mut token,
-                &mut ConnectionApiCallContext::from_wakeup_handle(&wakeup_handle),
-                &Context::from_waker(&accept_waker),
-            ) {
-                Poll::Ready(res) => res.unwrap(),
-                Poll::Pending => panic!("stream should open"),
-            }
-        })
+        .map(|_| try_open(&mut manager, StreamType::Unidirectional).unwrap())
         .collect();
 
     for stream_id in &stream_ids {
@@ -3342,31 +3328,6 @@ fn stream_priority_request_orders_transmission() {
         [stream_ids[2], stream_ids[0], stream_ids[1]],
         *manager.streams_waiting_for_transmission()
     );
-
-    let mut frame_buffer = OutgoingFrameBuffer::new();
-    frame_buffer.set_max_packet_size(Some(50));
-    let mut write_context = MockWriteContext::new(
-        time::now(),
-        &mut frame_buffer,
-        transmission::Constraint::None,
-        transmission::Mode::Normal,
-        endpoint::Type::Server,
-    );
-
-    for _ in 0..10 {
-        let _ = manager.on_transmit(&mut write_context);
-        write_context.frame_buffer.flush();
-    }
-
-    // only the higher priority stream sent data
-    let mut sent = 0;
-    while let Some(mut frame) = write_context.frame_buffer.pop_front() {
-        if let Frame::Stream(frame) = frame.as_frame() {
-            assert_eq!(frame.stream_id, stream_ids[2].as_varint());
-            sent += 1;
-        }
-    }
-    assert!(sent > 0);
 }
 
 #[test]

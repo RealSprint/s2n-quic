@@ -205,19 +205,28 @@ impl<S: StreamTrait> InterestLists<S> {
 
         macro_rules! sync_interests {
             ($interest:expr, $link_name:ident, $list_name:ident) => {
-                if $interest != node.$link_name.is_linked() {
-                    if $interest {
-                        self.$list_name.push_back(node.clone());
-                    } else {
-                        // Safety: We know that the node is only ever part of this list.
-                        // While elements are in temporary lists, they always get unlinked
-                        // from those temporary lists while their interest is updated.
-                        let mut cursor = unsafe {
-                            self.$list_name
-                                .cursor_mut_from_ptr(node.deref() as *const StreamNode<S>)
-                        };
-                        cursor.remove();
-                    }
+                sync_interests!(
+                    $interest,
+                    $link_name,
+                    $list_name,
+                    false,
+                    self.$list_name.push_back(node.clone())
+                )
+            };
+            // `$requeue` unlinks a node that stays interested, so `$insert` places it again
+            ($interest:expr, $link_name:ident, $list_name:ident, $requeue:expr, $insert:expr) => {
+                if node.$link_name.is_linked() && (!$interest || $requeue) {
+                    // Safety: We know that the node is only ever part of this list.
+                    // While elements are in temporary lists, they always get unlinked
+                    // from those temporary lists while their interest is updated.
+                    let mut cursor = unsafe {
+                        self.$list_name
+                            .cursor_mut_from_ptr(node.deref() as *const StreamNode<S>)
+                    };
+                    cursor.remove();
+                }
+                if $interest && !node.$link_name.is_linked() {
+                    $insert;
                 }
                 debug_assert_eq!($interest, node.$link_name.is_linked());
             };
@@ -228,20 +237,14 @@ impl<S: StreamTrait> InterestLists<S> {
             waiting_for_frame_delivery_link,
             waiting_for_frame_delivery
         );
-        let wants_transmission = matches!(interests.transmission, transmission::Interest::NewData);
-        let is_queued = node.waiting_for_transmission_link.is_linked();
         let reprioritized = node.priority.replace(interests.priority) != interests.priority;
-        if is_queued && (!wants_transmission || reprioritized) {
-            // Safety: see `sync_interests`
-            let mut cursor = unsafe {
-                self.waiting_for_transmission
-                    .cursor_mut_from_ptr(node.deref() as *const StreamNode<S>)
-            };
-            cursor.remove();
-        }
-        if wants_transmission && !node.waiting_for_transmission_link.is_linked() {
-            self.queue_for_transmission(node.clone());
-        }
+        sync_interests!(
+            matches!(interests.transmission, transmission::Interest::NewData),
+            waiting_for_transmission_link,
+            waiting_for_transmission,
+            reprioritized,
+            self.queue_for_transmission(node.clone())
+        );
         sync_interests!(
             matches!(interests.transmission, transmission::Interest::LostData),
             waiting_for_retransmission_link,
