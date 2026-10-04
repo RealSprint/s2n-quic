@@ -14,6 +14,9 @@ use crate::{
 };
 use num_rational::Ratio;
 
+/// The BBR draft's send quantum window: `BBR.send_quantum = min(BBR.pacing_rate * 1ms, 64KBytes)`
+const DEFAULT_SEND_QUANTUM_WINDOW: Duration = Duration::from_millis(1);
+
 /// A packet pacer that returns departure times that evenly distribute bursts of packets over time
 #[derive(Clone, Debug)]
 pub struct Pacer {
@@ -25,6 +28,8 @@ pub struct Pacer {
     pacing_rate: Bandwidth,
     // The maximum size of a data aggregate scheduled and transmitted together
     send_quantum: usize,
+    // How much pacing-rate time a burst aggregates (BBR draft: 1 ms)
+    send_quantum_window: Duration,
 }
 
 impl Pacer {
@@ -45,6 +50,9 @@ impl Pacer {
             next_packet_departure_time: None,
             pacing_rate,
             send_quantum: Self::max_send_quantum(max_datagram_size),
+            send_quantum_window: app_settings
+                .send_quantum_window()
+                .unwrap_or(DEFAULT_SEND_QUANTUM_WINDOW),
         }
     }
 
@@ -122,7 +130,7 @@ impl Pacer {
             max_datagram_size * 2
         } as usize;
 
-        let send_quantum = (self.pacing_rate * Duration::from_millis(1)) as usize;
+        let send_quantum = (self.pacing_rate * self.send_quantum_window) as usize;
         self.send_quantum = send_quantum
             .max(floor)
             .min(Self::max_send_quantum(max_datagram_size));
@@ -317,6 +325,22 @@ mod tests {
         // pacing_Rate * 1ms = 100000 bytes
         // send_quantum = min(100000, 12_000) = 12_000
         // send_quantum = max(12_000, 2 * MINIMUM_MAX_DATAGRAM_SIZE) = 12_000
+        assert_eq!(12_000, pacer.send_quantum);
+    }
+
+    #[test]
+    fn set_send_quantum_with_a_longer_window() {
+        let settings = crate::recovery::bbr::builder::Builder::default()
+            .with_send_quantum_window(Duration::from_millis(40))
+            .build();
+        let mut pacer = Pacer::new(MINIMUM_MAX_DATAGRAM_SIZE, &settings.app_settings);
+        // 1.1 Mbps * 40ms = 5500 bytes: above the one-datagram floor, below the cap
+        pacer.pacing_rate = Bandwidth::new(1_100_000 / 8, Duration::from_secs(1));
+        pacer.set_send_quantum(MINIMUM_MAX_DATAGRAM_SIZE);
+        assert_eq!(5500, pacer.send_quantum);
+        // 10 MBps * 40ms = 400_000 bytes: capped at MAX_BURST_PACKETS datagrams
+        pacer.pacing_rate = Bandwidth::new(10_000_000, Duration::from_secs(1));
+        pacer.set_send_quantum(MINIMUM_MAX_DATAGRAM_SIZE);
         assert_eq!(12_000, pacer.send_quantum);
     }
 
