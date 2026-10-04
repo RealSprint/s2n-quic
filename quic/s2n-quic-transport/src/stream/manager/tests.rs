@@ -3394,7 +3394,8 @@ fn stream_priority_sends_a_reset_first() {
         .map(|_| try_open(&mut manager, StreamType::Unidirectional).unwrap())
         .collect();
 
-    for (stream_id, priority) in stream_ids.iter().zip([5, 0]) {
+    // the highest priority an application can ask for stays below a pending reset
+    for (stream_id, priority) in stream_ids.iter().zip([i32::MAX, 0]) {
         let mut data = [bytes::Bytes::from_static(&[1; 2000])];
         poll_tx(
             &mut manager,

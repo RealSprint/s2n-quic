@@ -621,7 +621,15 @@ impl<'chunks> TxRequest<'_, 'chunks> {
             .tx
             .expect("invalid response");
 
-        self.state.tx = response.status;
+        // A priority-only request doesn't observe the stream's state
+        let priority_only = self
+            .request
+            .tx
+            .as_ref()
+            .is_some_and(|tx| tx.is_priority_only());
+        if !priority_only {
+            self.state.tx = response.status;
+        }
 
         Ok(response)
     }

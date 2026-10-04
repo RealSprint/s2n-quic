@@ -759,7 +759,8 @@ impl SendStream {
         }
 
         if let Some(priority) = request.priority {
-            self.priority = priority;
+            // i32::MAX is kept for streams with a pending reset
+            self.priority = priority.min(i32::MAX - 1);
         }
 
         macro_rules! store_waker {
@@ -1064,8 +1065,7 @@ impl StreamInterestProvider for SendStream {
             //# STREAM_DATA_BLOCKED frame for a stream in the "Reset Sent" state or
             //# any terminal state -- that is, after sending a RESET_STREAM frame.
             SendStreamState::ResetSent(_) => {
-                // A pending RESET_STREAM goes ahead of data on other streams. Receive side
-                // frames of the stream keep its priority.
+                // While a reset is pending the whole stream goes ahead of other streams
                 interests.priority = i32::MAX;
                 interests.with_transmission(|query| self.reset_sync.transmission_interest(query))
             }

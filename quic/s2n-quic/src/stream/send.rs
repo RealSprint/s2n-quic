@@ -396,7 +396,9 @@ macro_rules! impl_send_stream_api {
         /// Sets the send priority of the stream.
         ///
         /// Streams with a higher priority are sent first. Streams with the same priority share
-        /// the connection in round-robin order. The default priority is `0`.
+        /// the connection in round-robin order. The default priority is `0`. `i32::MAX` is
+        /// reserved for streams with a pending reset; higher requests are lowered to
+        /// `i32::MAX - 1`.
         #[inline]
         pub fn set_priority(&mut self, priority: i32) -> $crate::stream::Result<()> {
             macro_rules! $dispatch {
