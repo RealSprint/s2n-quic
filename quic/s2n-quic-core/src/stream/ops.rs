@@ -207,6 +207,26 @@ pub mod tx {
         pub priority: Option<i32>,
     }
 
+    impl Request<'_> {
+        /// Returns `true` if the request only sets the send priority
+        pub fn is_priority_only(&self) -> bool {
+            let Self {
+                chunks,
+                reset,
+                flush,
+                finish,
+                detached,
+                priority,
+            } = self;
+            priority.is_some()
+                && chunks.is_none()
+                && reset.is_none()
+                && !flush
+                && !finish
+                && !detached
+        }
+    }
+
     /// The result of a tx request
     #[derive(Debug, PartialEq, Eq)]
     pub struct Response {

@@ -760,16 +760,11 @@ impl SendStream {
 
         if let Some(priority) = request.priority {
             self.priority = priority;
+        }
 
-            // A priority-only request leaves the stream state alone
-            if request.chunks.is_none()
-                && request.reset.is_none()
-                && !request.finish
-                && !request.flush
-                && !request.detached
-            {
-                return Ok(response);
-            }
+        // A priority-only request leaves the stream state alone
+        if request.is_priority_only() {
+            return Ok(response);
         }
 
         macro_rules! store_waker {

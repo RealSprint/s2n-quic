@@ -136,7 +136,6 @@ macro_rules! insert_by_priority {
     ($list:expr, $node:expr) => {{
         let node = $node;
         let priority = node.priority.get();
-        let had_head = !$list.is_empty();
         let mut cursor = $list.back_mut();
         while cursor
             .get()
@@ -144,7 +143,7 @@ macro_rules! insert_by_priority {
         {
             cursor.move_prev();
         }
-        let new_head = had_head && cursor.is_null();
+        let new_head = cursor.is_null() && cursor.peek_next().get().is_some();
         // At the null position this inserts at the front
         cursor.insert_after(node);
         new_head
@@ -388,12 +387,11 @@ macro_rules! send_on_transmission_list {
         $func:ident,
         $counter:ident,
         $interest_type:pat,
-        $requeue:ident,
     ) => {
         // Head node gets pushed to the back of the list if it has run out of sending credits
         if $sel.interest_lists.$counter >= $sel.interest_lists.transmission_limit {
             if let Some(node) = $sel.interest_lists.$list_name.pop_front() {
-                $sel.interest_lists.$requeue(node);
+                insert_by_priority!($sel.interest_lists.$list_name, node);
                 $sel.interest_lists.$counter = 0;
             }
         }
@@ -674,7 +672,6 @@ impl<S: StreamTrait> StreamContainer<S> {
             func,
             transmission_counter,
             transmission::Interest::NewData,
-            queue_for_transmission,
         );
     }
 
@@ -715,7 +712,6 @@ impl<S: StreamTrait> StreamContainer<S> {
             func,
             retransmission_counter,
             transmission::Interest::LostData,
-            queue_for_retransmission,
         );
     }
 

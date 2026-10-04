@@ -411,6 +411,17 @@ fn create_stream_manager(local_ep_type: endpoint::Type) -> AbstractStreamManager
 }
 
 /// Tries to open a new stream and returns an error if we're at the limit
+/// A server stream manager with real streams and default limits
+fn create_stream_impl_manager() -> AbstractStreamManager<stream::StreamImpl> {
+    AbstractStreamManager::<stream::StreamImpl>::new(
+        &ConnectionLimits::default(),
+        endpoint::Type::Server,
+        create_default_initial_flow_control_limits(),
+        create_default_initial_flow_control_limits(),
+        DEFAULT_INITIAL_RTT,
+    )
+}
+
 fn try_open<S: StreamTrait + 'static>(
     manager: &mut AbstractStreamManager<S>,
     stream_type: StreamType,
@@ -3298,13 +3309,7 @@ fn stream_priority_orders_the_transmission_list() {
 
 #[test]
 fn stream_priority_request_orders_transmission() {
-    let mut manager = AbstractStreamManager::<stream::StreamImpl>::new(
-        &ConnectionLimits::default(),
-        endpoint::Type::Server,
-        create_default_initial_flow_control_limits(),
-        create_default_initial_flow_control_limits(),
-        DEFAULT_INITIAL_RTT,
-    );
+    let mut manager = create_stream_impl_manager();
 
     let stream_ids: Vec<StreamId> = (0..3)
         .map(|_| try_open(&mut manager, StreamType::Unidirectional).unwrap())
@@ -3354,13 +3359,7 @@ fn stream_priority_orders_the_retransmission_list() {
 
 #[test]
 fn stream_priority_request_on_a_reset_stream() {
-    let mut manager = AbstractStreamManager::<stream::StreamImpl>::new(
-        &ConnectionLimits::default(),
-        endpoint::Type::Server,
-        create_default_initial_flow_control_limits(),
-        create_default_initial_flow_control_limits(),
-        DEFAULT_INITIAL_RTT,
-    );
+    let mut manager = create_stream_impl_manager();
     let stream_id = try_open(&mut manager, StreamType::Unidirectional).unwrap();
 
     manager
