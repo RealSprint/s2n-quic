@@ -255,7 +255,17 @@ impl<S: StreamTrait> InterestLists<S> {
             waiting_for_frame_delivery_link,
             waiting_for_frame_delivery
         );
+        macro_rules! is_head {
+            ($list_name:ident) => {
+                self.$list_name
+                    .front()
+                    .get()
+                    .is_some_and(|head| core::ptr::eq(head, node.deref()))
+            };
+        }
+
         let reprioritized = node.priority.replace(interests.priority) != interests.priority;
+        let was_transmission_head = is_head!(waiting_for_transmission);
         sync_interests!(
             matches!(interests.transmission, transmission::Interest::NewData),
             waiting_for_transmission_link,
@@ -263,6 +273,11 @@ impl<S: StreamTrait> InterestLists<S> {
             reprioritized,
             self.queue_for_transmission(node.clone())
         );
+        // A Stream that takes over the head starts a new batch
+        if was_transmission_head && !is_head!(waiting_for_transmission) {
+            self.transmission_counter = 0;
+        }
+        let was_retransmission_head = is_head!(waiting_for_retransmission);
         sync_interests!(
             matches!(interests.transmission, transmission::Interest::LostData),
             waiting_for_retransmission_link,
@@ -270,6 +285,9 @@ impl<S: StreamTrait> InterestLists<S> {
             reprioritized,
             self.queue_for_retransmission(node.clone())
         );
+        if was_retransmission_head && !is_head!(waiting_for_retransmission) {
+            self.retransmission_counter = 0;
+        }
         sync_interests!(
             interests.connection_flow_control_credits,
             waiting_for_connection_flow_control_credits_link,

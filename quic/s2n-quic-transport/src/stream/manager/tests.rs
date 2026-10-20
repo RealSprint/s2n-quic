@@ -3500,3 +3500,80 @@ fn stream_batching_test() {
         }
     }
 }
+
+#[test]
+fn a_stream_that_takes_over_the_head_gets_its_own_batch() {
+    let mut manager = AbstractStreamManager::<stream::StreamImpl>::new(
+        &ConnectionLimits::default(),
+        endpoint::Type::Server,
+        create_default_initial_flow_control_limits(),
+        create_default_initial_flow_control_limits(),
+        DEFAULT_INITIAL_RTT,
+    );
+
+    let stream_ids: Vec<StreamId> = (0..3)
+        .map(|_| {
+            let (accept_waker, _accept_wake_counter) = new_count_waker();
+            let (_wakeup_queue, wakeup_handle) = create_wakeup_queue_and_handle();
+            let mut token = connection::OpenToken::new();
+            match manager.poll_open_local_stream(
+                StreamType::Bidirectional,
+                &mut token,
+                &mut ConnectionApiCallContext::from_wakeup_handle(&wakeup_handle),
+                &Context::from_waker(&accept_waker),
+            ) {
+                Poll::Ready(res) => res.unwrap(),
+                Poll::Pending => panic!("stream open is pending"),
+            }
+        })
+        .collect();
+    let [first, second, third] = stream_ids[..] else {
+        unreachable!()
+    };
+
+    for stream_id in &stream_ids {
+        manager
+            .with_asserted_stream(*stream_id, |stream: &mut stream::StreamImpl| {
+                let data = bytes::Bytes::from_static(&[1; 2000]);
+                stream.poll_request(ops::Request::default().send(&mut [data]), None)
+            })
+            .unwrap();
+    }
+
+    let mut frame_buffer = OutgoingFrameBuffer::new();
+    frame_buffer.set_max_packet_size(Some(50));
+    let mut write_context = MockWriteContext::new(
+        time::now(),
+        &mut frame_buffer,
+        transmission::Constraint::None,
+        transmission::Mode::Normal,
+        endpoint::Type::Server,
+    );
+
+    // The head uses up its batch, then its packet is lost
+    let packet_number = write_context.packet_number();
+    let _ = manager.on_transmit(&mut write_context);
+    write_context.frame_buffer.flush();
+    manager.on_packet_loss(&PacketNumberRange::new(packet_number, packet_number));
+    assert_eq!(
+        vec![second, third],
+        manager.streams_waiting_for_transmission()
+    );
+
+    // The retransmission puts the first stream back in the queue
+    let _ = manager.on_transmit(&mut write_context);
+    write_context.frame_buffer.flush();
+    assert!(manager.streams_waiting_for_retransmission().is_empty());
+    assert_eq!(
+        vec![second, third, first],
+        manager.streams_waiting_for_transmission()
+    );
+
+    // The new head sends before it is rotated
+    let _ = manager.on_transmit(&mut write_context);
+    write_context.frame_buffer.flush();
+    assert_eq!(
+        vec![second, third, first],
+        manager.streams_waiting_for_transmission()
+    );
+}
