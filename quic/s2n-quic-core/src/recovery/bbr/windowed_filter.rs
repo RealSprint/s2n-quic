@@ -82,9 +82,8 @@ impl<
         self.current_value
     }
 
-    /// The stored value is older than the window: the next sample replaces it.
     #[inline]
-    pub fn window_expired(&self, now: TimeType) -> bool {
+    fn window_expired(&self, now: TimeType) -> bool {
         self.last_updated
             .is_some_and(|last_updated| now - last_updated >= self.window_length)
     }
