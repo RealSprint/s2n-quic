@@ -24,6 +24,9 @@ pub struct Pacer {
     capacity: Counter<u32, Saturating>,
     // The time the next packet should be transmitted
     next_packet_departure_time: Option<Timestamp>,
+    // The departure time `next_packet_departure_time` was scheduled from, the bytes it was spaced
+    // for and when it was scheduled, so a higher pacing rate can reschedule it
+    scheduled_from: Option<(Timestamp, usize, Timestamp)>,
     // The current pacing rate for a BBR flow, which controls inter-packet spacing
     pacing_rate: Bandwidth,
     // The maximum size of a data aggregate scheduled and transmitted together
@@ -48,6 +51,7 @@ impl Pacer {
         Self {
             capacity: Default::default(),
             next_packet_departure_time: None,
+            scheduled_from: None,
             pacing_rate,
             send_quantum: Self::max_send_quantum(max_datagram_size),
             send_quantum_window: app_settings
@@ -60,11 +64,15 @@ impl Pacer {
     #[inline]
     pub fn on_packet_sent(&mut self, now: Timestamp, bytes_sent: usize, rtt: Duration) {
         if rtt < MINIMUM_PACING_RTT {
+            // Pacing is off, so a departure time scheduled earlier must not hold sending back
+            self.next_packet_departure_time = None;
+            self.scheduled_from = None;
             return;
         }
 
         if self.capacity == 0 {
             if let Some(next_packet_departure_time) = self.next_packet_departure_time {
+                self.scheduled_from = Some((next_packet_departure_time, self.send_quantum, now));
                 self.next_packet_departure_time =
                     Some((next_packet_departure_time + self.interval()).max(now));
             } else {
@@ -104,6 +112,9 @@ impl Pacer {
         let rate = Self::bandwidth_to_pacing_rate(bw, gain);
 
         if filled_pipe || rate > self.pacing_rate {
+            if rate > self.pacing_rate {
+                self.reschedule(rate);
+            }
             self.pacing_rate = rate;
             publisher.on_pacing_rate_updated(rate, self.send_quantum as u32, gain);
         }
@@ -134,6 +145,22 @@ impl Pacer {
         self.send_quantum = send_quantum
             .max(floor)
             .min(Self::max_send_quantum(max_datagram_size));
+    }
+
+    /// Spaces the scheduled departure for the bytes it was scheduled for at the higher `rate`,
+    /// so a schedule made at a much lower rate does not hold sending back.
+    #[inline]
+    fn reschedule(&mut self, rate: Bandwidth) {
+        if let (Some(next), Some((from, bytes, scheduled_at))) =
+            (self.next_packet_departure_time, self.scheduled_from)
+        {
+            // Never earlier than when it was scheduled: credit for time the sender sat idle was
+            // already given up then
+            let rescheduled = (from + bytes as u64 / rate).max(scheduled_at);
+            if rescheduled < next {
+                self.next_packet_departure_time = Some(rescheduled);
+            }
+        }
     }
 
     /// Returns the earliest time that a packet may be transmitted.
@@ -384,5 +411,135 @@ mod tests {
             .earliest_departure_time()
             .unwrap()
             .has_elapsed(now + rtt));
+    }
+
+    fn slow_schedule(rate: Bandwidth, rtt: Duration) -> (Pacer, crate::time::Timestamp) {
+        let mut pacer = Pacer::new(MINIMUM_MAX_DATAGRAM_SIZE, &Default::default());
+        let mut publisher = event::testing::Publisher::no_snapshot();
+        let mut publisher = PathPublisher::new(&mut publisher, path::Id::test_id());
+        let now = NoopClock.get_time();
+        pacer.set_pacing_rate(rate, Ratio::new(1, 1), true, &mut publisher);
+        pacer.set_send_quantum(MINIMUM_MAX_DATAGRAM_SIZE);
+        // The first send opens a slot; the one after its capacity is used schedules the next
+        pacer.on_packet_sent(now, MINIMUM_MAX_DATAGRAM_SIZE as usize, rtt);
+        pacer.on_packet_sent(now, MINIMUM_MAX_DATAGRAM_SIZE as usize, rtt);
+        (pacer, now)
+    }
+
+    #[test]
+    fn a_slow_rate_keeps_its_spacing() {
+        let rtt = Duration::from_millis(120);
+        // 1200 B at 650 B/s: about 1.85 s, far more than a round trip
+        let rate = Bandwidth::new(650, Duration::from_secs(1));
+        let (pacer, now) = slow_schedule(rate, rtt);
+        let expected =
+            now + INITIAL_INTERVAL + MINIMUM_MAX_DATAGRAM_SIZE as u64 / pacer.pacing_rate;
+        assert_eq!(Some(expected), pacer.earliest_departure_time());
+        assert!(expected > now + rtt);
+    }
+
+    #[test]
+    fn a_higher_rate_reschedules_the_departure_at_that_rate() {
+        let rtt = Duration::from_millis(120);
+        let (mut pacer, now) = slow_schedule(Bandwidth::new(650, Duration::from_secs(1)), rtt);
+        let mut publisher = event::testing::Publisher::no_snapshot();
+        let mut publisher = PathPublisher::new(&mut publisher, path::Id::test_id());
+        let slow = pacer.earliest_departure_time().unwrap();
+
+        pacer.set_pacing_rate(
+            Bandwidth::new(500_000, Duration::from_secs(1)),
+            Ratio::new(1, 1),
+            false,
+            &mut publisher,
+        );
+        let rescheduled = pacer.earliest_departure_time().unwrap();
+        // The same bytes are spaced at the new rate: much earlier, but not skipped
+        assert_eq!(
+            now + INITIAL_INTERVAL + MINIMUM_MAX_DATAGRAM_SIZE as u64 / pacer.pacing_rate,
+            rescheduled
+        );
+        assert!(rescheduled < slow);
+        assert!(rescheduled > now);
+
+        // A lower rate (in Startup, filled_pipe false) is ignored and leaves the schedule alone
+        pacer.set_pacing_rate(
+            Bandwidth::new(1_000, Duration::from_secs(1)),
+            Ratio::new(1, 1),
+            false,
+            &mut publisher,
+        );
+        assert_eq!(Some(rescheduled), pacer.earliest_departure_time());
+    }
+
+    #[test]
+    fn a_higher_rate_never_delays_the_departure() {
+        let rtt = Duration::from_millis(120);
+        let (mut pacer, now) =
+            slow_schedule(Bandwidth::new(1_000_000, Duration::from_secs(1)), rtt);
+        let mut publisher = event::testing::Publisher::no_snapshot();
+        let mut publisher = PathPublisher::new(&mut publisher, path::Id::test_id());
+        // At this rate a slot holds two packets, so the third schedules the next slot
+        pacer.on_packet_sent(now, MINIMUM_MAX_DATAGRAM_SIZE as usize, rtt);
+        assert!(pacer.scheduled_from.is_some());
+        // An accepted decrease keeps the departure scheduled at the higher rate
+        pacer.set_pacing_rate(
+            Bandwidth::new(100_000, Duration::from_secs(1)),
+            Ratio::new(1, 1),
+            true,
+            &mut publisher,
+        );
+        let before = pacer.earliest_departure_time();
+        assert!(before.is_some());
+        // An increase whose spacing would end after that departure leaves it alone
+        pacer.set_pacing_rate(
+            Bandwidth::new(200_000, Duration::from_secs(1)),
+            Ratio::new(1, 1),
+            true,
+            &mut publisher,
+        );
+        assert_eq!(before, pacer.earliest_departure_time());
+    }
+
+    #[test]
+    fn a_reschedule_does_not_return_credit_for_idle_time() {
+        let rtt = Duration::from_millis(120);
+        let mut pacer = Pacer::new(MINIMUM_MAX_DATAGRAM_SIZE, &Default::default());
+        let mut publisher = event::testing::Publisher::no_snapshot();
+        let mut publisher = PathPublisher::new(&mut publisher, path::Id::test_id());
+        let start = NoopClock.get_time();
+        pacer.set_pacing_rate(
+            Bandwidth::new(100_000, Duration::from_secs(1)),
+            Ratio::new(1, 1),
+            true,
+            &mut publisher,
+        );
+        pacer.set_send_quantum(MINIMUM_MAX_DATAGRAM_SIZE);
+        pacer.on_packet_sent(start, MINIMUM_MAX_DATAGRAM_SIZE as usize, rtt);
+        pacer.on_packet_sent(start, MINIMUM_MAX_DATAGRAM_SIZE as usize, rtt);
+
+        // After a long idle period the next slot is clamped to now
+        let now = start + Duration::from_secs(5);
+        pacer.on_packet_sent(now, MINIMUM_MAX_DATAGRAM_SIZE as usize, rtt);
+        assert_eq!(Some(now), pacer.earliest_departure_time());
+
+        // A higher rate must not move the departure back into the idle period
+        pacer.set_pacing_rate(
+            Bandwidth::new(1_000_000, Duration::from_secs(1)),
+            Ratio::new(1, 1),
+            false,
+            &mut publisher,
+        );
+        assert_eq!(Some(now), pacer.earliest_departure_time());
+    }
+
+    #[test]
+    fn a_round_trip_below_the_pacing_minimum_clears_the_schedule() {
+        let (mut pacer, now) = slow_schedule(
+            Bandwidth::new(650, Duration::from_secs(1)),
+            Duration::from_millis(120),
+        );
+        assert!(pacer.earliest_departure_time().is_some());
+        pacer.on_packet_sent(now, MINIMUM_MAX_DATAGRAM_SIZE as usize, Duration::ZERO);
+        assert!(pacer.earliest_departure_time().is_none());
     }
 }
