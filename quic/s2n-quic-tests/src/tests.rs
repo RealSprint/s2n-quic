@@ -44,6 +44,7 @@ mod mtu;
 mod new_token;
 mod no_tls;
 mod offload;
+mod pacing_timer;
 mod platform_events;
 mod pto;
 mod resumption;

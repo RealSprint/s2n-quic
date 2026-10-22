@@ -493,6 +493,24 @@ impl<Config: endpoint::Config> ConnectionImpl<Config> {
         Some(Duration::from_millis(duration))
     }
 
+    /// Keeps an armed pacing timer in step with the active path's congestion controller, whose
+    /// departure time moves when an ACK changes the pacing rate or the active path changes.
+    #[inline]
+    fn sync_pacing_timer(&mut self, timestamp: Timestamp) {
+        if !self.timers.pacing_timer.is_armed() {
+            return;
+        }
+        match self
+            .path_manager
+            .active_path()
+            .congestion_controller
+            .earliest_departure_time()
+        {
+            Some(edt) if !edt.has_elapsed(timestamp) => self.timers.pacing_timer.set(edt),
+            _ => self.timers.pacing_timer.cancel(),
+        }
+    }
+
     fn on_processed_packet(
         &mut self,
         packet: &ProcessedPacket,
@@ -507,6 +525,9 @@ impl<Config: endpoint::Config> ConnectionImpl<Config> {
                 .set(packet.datagram.timestamp + duration);
             self.timers.reset_peer_idle_timer_on_send = true;
         }
+
+        // ACKs in the packet may have moved the congestion controller's departure time
+        self.sync_pacing_timer(packet.datagram.timestamp);
 
         let mut publisher = self
             .event_context
@@ -1274,6 +1295,9 @@ impl<Config: endpoint::Config> connection::Trait for ConnectionImpl<Config> {
         if self.poll_flush().is_ready() {
             return self.error;
         }
+
+        // A path timeout may have changed the active path, and so the departure time to wait for
+        self.sync_pacing_timer(timestamp);
 
         // TODO: enable this check once all of the component timers are fixed
         /*
